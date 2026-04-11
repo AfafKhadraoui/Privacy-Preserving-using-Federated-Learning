@@ -22,75 +22,86 @@ class FaceAugmentation:
     """
     Face augmentation pipeline for federated learning clients.
 
-    This class applies random transformations to face images
-    before feeding them into the model during training.
+    Supports configurable augmentation strength:
+    - affine (pose/misalignment)
+    - gaussian blur (out-of-focus simulation)
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        use_affine=True,
+        use_blur=False
+    ):
         """
         Initialize augmentation pipeline.
+
+        Args:
+            use_affine (bool): enable slight geometric transformations
+            use_blur (bool): enable gaussian blur simulation
         """
 
-        self.transform = transforms.Compose([
-            # Randomly flip face horizontally (helps with left/right variation)
-            transforms.RandomHorizontalFlip(p=0.5),
+        transforms_list = []
 
-            # Small rotation to simulate head tilt
-            transforms.RandomRotation(degrees=10),
+        # -----------------------------
+        # Basic augmentations
+        # -----------------------------
+        transforms_list.append(
+            transforms.RandomHorizontalFlip(p=0.5)
+        )
 
-            # Adjust brightness, contrast, and saturation
-            # simulates different lighting conditions
+        transforms_list.append(
+            transforms.RandomRotation(degrees=10)
+        )
+
+        transforms_list.append(
             transforms.ColorJitter(
                 brightness=0.2,
                 contrast=0.2,
                 saturation=0.2,
                 hue=0.05
             )
-        ])
+        )
+
+        # -----------------------------
+        # Optional affine transform
+        # -----------------------------
+        if use_affine:
+            transforms_list.append(
+                transforms.RandomAffine(
+                    degrees=5,              # small rotation
+                    translate=(0.02, 0.02), # small shift
+                    scale=(0.95, 1.05),     # slight zoom
+                    shear=2                 # slight distortion
+                )
+            )
+
+        # -----------------------------
+        # Optional gaussian blur
+        # -----------------------------
+        if use_blur:
+            transforms_list.append(
+                transforms.GaussianBlur(
+                    kernel_size=3,
+                    sigma=(0.1, 1.0)
+                )
+            )
+
+        self.transform = transforms.Compose(transforms_list)
 
     def __call__(self, image):
         """
         Apply augmentation to a single image.
-
-        Args:
-            image (Tensor or PIL Image):
-                Input face image.
-
-        Returns:
-            Tensor or PIL Image:
-                Augmented image.
         """
         return self.transform(image)
 
     def augment_batch(self, images):
         """
         Apply augmentation to a batch of images.
-
-        Args:
-            images (list or tensor batch):
-                Collection of face images.
-
-        Returns:
-            list:
-                Augmented images.
         """
         return [self.transform(img) for img in images]
-    
-def generate_variants(self, image, n=5):
-    """
-    Generate N augmented versions of the same image.
 
-    Useful for dataset expansion or testing scenarios.
-
-    Args:
-        image:
-            Input face image (Tensor or PIL Image)
-
-        n (int):
-            Number of augmented versions to generate
-
-    Returns:
-        list:
-            List of augmented images
-    """
-    return [self.transform(image) for _ in range(n)]
+    def generate_variants(self, image, n=5):
+        """
+        Generate N augmented versions of the same image.
+        """
+        return [self.transform(image) for _ in range(n)]

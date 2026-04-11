@@ -1,14 +1,16 @@
 import torch
+import numpy as np
 from PIL import Image
 
-from src.augmentation.augment import FaceAugmentation, generate_variants
+from src.augmentation.augment import FaceAugmentation
 
 
 def create_dummy_image():
     """
     Create a fake 160x160 RGB face image for testing.
     """
-    return Image.fromarray((torch.rand(160, 160, 3) * 255).byte().numpy())
+    arr = (np.random.rand(160, 160, 3) * 255).astype("uint8")
+    return Image.fromarray(arr)
 
 
 def test_call_method():
@@ -38,12 +40,13 @@ def test_batch_augmentation():
 
 
 def test_generate_variants():
-    print("\n[TEST] generate_variants function")
+    print("\n[TEST] generate_variants method")
 
+    augmenter = FaceAugmentation()
     img = create_dummy_image()
 
     n = 6
-    variants = generate_variants(FaceAugmentation(), img, n)
+    variants = augmenter.generate_variants(img, n)
 
     assert len(variants) == n
 
@@ -59,8 +62,6 @@ def test_consistency_check():
     out1 = augmenter(img)
     out2 = augmenter(img)
 
-    # They should NOT be identical most of the time
-    # (we just check shape/type consistency, not equality)
     assert out1 is not None
     assert out2 is not None
 
