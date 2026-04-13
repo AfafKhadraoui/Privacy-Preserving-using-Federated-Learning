@@ -11,4 +11,7 @@ tests/*.pth
 
 # Python cache
 __pycache__/
-*.pyc
+*.pycdata/ 
+logs/ 
+debug_crop.png 
+__pycache__/ 
