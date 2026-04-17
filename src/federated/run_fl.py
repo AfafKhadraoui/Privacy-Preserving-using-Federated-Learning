@@ -49,13 +49,46 @@ def main(use_dp=False):
     # Give the server a few seconds to wake up and get ready on port 8080
     time.sleep(3)
     
-    # 2. Wake up all the client devices
-    for i in range(config.NUM_CLIENTS):
+    # 2. Discover all available client folders
+    # We look for folders named 'client_xx' in the CLIENTS_DIR
+    client_folders = sorted([
+        d for d in os.listdir(config.CLIENTS_DIR) 
+        if os.path.isdir(os.path.join(config.CLIENTS_DIR, d)) and d.startswith("client_")
+    ])
+    
+    num_total_clients = len(client_folders)
+    print(f"Found {num_total_clients} client folders in {config.CLIENTS_DIR}")
+    
+    if num_total_clients < config.MIN_CLIENTS:
+        print(f"WARNING: Only found {num_total_clients} clients, but server needs {config.MIN_CLIENTS}.")
+        print("Increasing the server's patience or add more data folders!")
+
+    # --- SANITY CHECKS TO PREVENT PC CRASHING ---
+    # 1. Limit CPU threads per process so multiprocessing doesn't freeze the system
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    
+    try:
+        import psutil
+        mem = psutil.virtual_memory()
+        print(f"System memory available: {mem.available / (1024**3):.2f} GB")
+        if mem.available < 4 * 1024**3:
+            print("WARNING: You have less than 4GB of free RAM! The simulation might crash.")
+    except ImportError:
+        pass
+    # --------------------------------------------
+    
+    # 3. Wake up all the client devices staggeredly
+    for i in range(num_total_clients):
         client_proc = multiprocessing.Process(target=run_client, args=(i, use_dp))
         client_proc.start()
         processes.append(client_proc)
+        # Sleep to staggered memory loading and prevent immediate OOM killer
+        print(f"Started client_0{i}. Waiting 3 seconds before starting next one to avoid RAM spike...")
+        time.sleep(3)
         
-    # 3. Wait for the round of schooling to finish!
+    # 4. Wait for the round of schooling to finish!
     for p in processes:
         p.join()
         

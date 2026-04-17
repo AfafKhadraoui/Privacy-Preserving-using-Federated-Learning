@@ -1,2 +1,18 @@
 PROJECT_SPEC.md
 Security_Project.pdf
+
+# Model files
+*.pth
+*.pt
+*.onnx
+
+# Temporary test outputs
+tests/*.pth
+
+# Python cache
+__pycache__/
+*.pycdata/ 
+logs/ 
+debug_crop.png 
+__pycache__/ 
+data/
