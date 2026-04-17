@@ -15,3 +15,4 @@ __pycache__/
 logs/ 
 debug_crop.png 
 __pycache__/ 
+data/

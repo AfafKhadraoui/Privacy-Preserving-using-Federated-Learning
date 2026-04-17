@@ -8,7 +8,7 @@ import os
 
 # Federated Learning Settings
 NUM_ROUNDS    = 20    # Number of times the server and clients talk to each other
-NUM_CLIENTS   = 5   
+MIN_CLIENTS   = 5   
 LOCAL_EPOCHS  = 5     # How many times each device trains on its own photos before sending weights
 LEARNING_RATE = 1e-4
 

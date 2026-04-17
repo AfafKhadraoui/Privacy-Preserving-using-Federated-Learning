@@ -9,8 +9,9 @@ Usage (from project root):
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(PROJECT_ROOT))
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def test_single_image(image_path: str):
@@ -172,16 +173,28 @@ def validate_all_tensors():
 
 
 if __name__ == "__main__":
-    # ── Test 1: Change this path to a real image in your data/raw/ ──
-    SAMPLE_IMAGE = str(PROJECT_ROOT / "data" / "raw" / "abderrahim" / "photo1.jpg")
-    test_single_image(SAMPLE_IMAGE)
+    # Auto-pick one existing sample so this script works across different names/casing.
+    raw_dir = PROJECT_ROOT / "data" / "raw"
+    cropped_dir = PROJECT_ROOT / "data" / "cropped"
 
-    # ── Test 2: Change this path to a saved tensor after running prepare_dataset.py ──
-    SAMPLE_TENSOR = str(PROJECT_ROOT / "data" / "cropped" / "abderrahim" / "photo1.pt")
-    tensor_exists = Path(SAMPLE_TENSOR).exists()
-    if tensor_exists:
-        visualize_saved_tensor(SAMPLE_TENSOR, save_path="debug_crop.png")
+    sample_image_path = None
+    for pattern in ("*.jpg", "*.jpeg", "*.png", "*.JPG", "*.JPEG", "*.PNG"):
+        matches = sorted(raw_dir.rglob(pattern))
+        if matches:
+            sample_image_path = matches[0]
+            break
+
+    if sample_image_path is not None:
+        test_single_image(str(sample_image_path))
     else:
+        print("\nSkipping Test 1: no image found under data/raw/")
+        print("Add at least one image in data/raw/<person_name>/ and re-run.")
+
+    sample_tensor_candidates = sorted(cropped_dir.rglob("*.pt"))
+    if sample_tensor_candidates:
+        visualize_saved_tensor(str(sample_tensor_candidates[0]), save_path="debug_crop.png")
+    else:
+        SAMPLE_TENSOR = str(cropped_dir / "<person_name>" / "<sample>.pt")
         print(f"\nSkipping Test 2: {SAMPLE_TENSOR} not found yet.")
         print("Run prepare_dataset.py first, then re-run this script.")
 
