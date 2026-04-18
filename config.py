@@ -22,6 +22,12 @@ USE_DP = False
 NOISE_MULTIPLIER = 1.1   # How much noise we add to gradients. Higher = more private but worse accuracy.
 MAX_GRAD_NORM    = 1.0   # Clip the gradients so no single photo dominates the update
 DELTA            = 1e-5
+EPSILON_MAX      = 5.0   # Hard privacy budget cap (training should stop if exceeded)
+DP_RANDOM_SEED   = 42    # Reproducibility seed for DP experiments
+PROTOCOL_VERSION = "v1" # Version used in signed metadata / protocol integrity checks
+ENFORCE_SIGNATURES = True
+CRYPTO_DEBUG_LOGS = True
+CRYPTO_DEBUG_SHOW_FULL_KEYS = True
 
 # Model Parameters
 EMBEDDING_SIZE = 512
@@ -47,6 +53,7 @@ RESULTS_DIR    = os.path.join(BASE_DIR, "results")
 MODELS_DIR     = os.path.join(BASE_DIR, "results", "models")
 PLOTS_DIR      = os.path.join(BASE_DIR, "results", "plots")
 METRICS_DIR    = os.path.join(BASE_DIR, "results", "metrics")
+KEYS_DIR       = os.path.join(BASE_DIR, "data", "keys")
 
 # Saved models
 MODEL_CENTRALIZED = os.path.join(MODELS_DIR, "model_centralized.pth")
