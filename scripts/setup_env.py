@@ -9,7 +9,9 @@ REQUIRED_PACKAGES = [
     "facenet-pytorch",
     "flwr",
     "opencv-python",
-    "tqdm"
+    "tqdm",
+    "flask",
+    "flask-cors"
 ]
 
 
