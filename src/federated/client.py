@@ -148,7 +148,10 @@ class FaceClient(fl.client.NumPyClient):
     """
 
     def __init__(self, client_id, use_dp):
-        self.client_id = f"client_{client_id:02d}"
+        if isinstance(client_id, str) and not client_id.isdigit():
+            self.client_id = f"client_{client_id}"
+        else:
+            self.client_id = f"client_{int(client_id):02d}"
         self.client_dir = os.path.join(proj_cfg.CLIENTS_DIR, self.client_id)
         self.use_dp = use_dp
         self.local_round = 0
@@ -494,7 +497,7 @@ class FaceClient(fl.client.NumPyClient):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--client_id", type=int, required=True)
+    parser.add_argument("--client_id", type=str, required=True)
     parser.add_argument("--use_dp", action="store_true")
     args = parser.parse_args()
 

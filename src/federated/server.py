@@ -206,8 +206,8 @@ class SaveModelStrategy(fl.server.strategy.FedAvg):
             severity="INFO"
         )
 
-        if aggregated_parameters is not None and server_round == config.NUM_ROUNDS:
-            print(f"\n---> [Round {server_round}] Simulation finished! Extracting final weights...")
+        if aggregated_parameters is not None:
+            print(f"\n---> [Round {server_round}] Extracting weights to save global model...")
 
             ndarrays = fl.common.parameters_to_ndarrays(aggregated_parameters)
             model = get_model()

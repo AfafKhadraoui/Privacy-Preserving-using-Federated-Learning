@@ -53,10 +53,10 @@ export default function Register() {
     form.append('name', name);
     form.append('image', file);
     try {
-      const res = await axios.post('http://localhost:5000/api/register', form);
+      const res = await axios.post('http://localhost:5001/client/register', form);
       setStatus({ type: 'success', msg: res.data.message });
     } catch (err) {
-      setStatus({ type: 'error', msg: err.response?.data?.message || 'Server error.' });
+      setStatus({ type: 'error', msg: err.response?.data?.detail || err.response?.data?.message || 'Server error.' });
     }
     setLoading(false);
   };

@@ -80,12 +80,13 @@ def main(use_dp=False):
     # --------------------------------------------
     
     # 3. Wake up all the client devices staggeredly
-    for i in range(num_total_clients):
-        client_proc = multiprocessing.Process(target=run_client, args=(i, use_dp))
+    for i, folder_name in enumerate(client_folders):
+        actual_id = folder_name.replace("client_", "")
+        client_proc = multiprocessing.Process(target=run_client, args=(actual_id, use_dp))
         client_proc.start()
         processes.append(client_proc)
         # Sleep to staggered memory loading and prevent immediate OOM killer
-        print(f"Started client_0{i}. Waiting 3 seconds before starting next one to avoid RAM spike...")
+        print(f"Started {folder_name}. Waiting 3 seconds before starting next one to avoid RAM spike...")
         time.sleep(3)
         
     # 4. Wait for the round of schooling to finish!

@@ -16,3 +16,4 @@ logs/
 debug_crop.png 
 __pycache__/ 
 data/
+/.venv
