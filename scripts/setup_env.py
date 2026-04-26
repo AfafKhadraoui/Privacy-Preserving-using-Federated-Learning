@@ -11,7 +11,10 @@ REQUIRED_PACKAGES = [
     "opencv-python",
     "tqdm",
     "flask",
-    "flask-cors"
+    "flask-cors",
+    "fastapi",
+    "uvicorn",
+    "python-multipart"
 ]
 
 
