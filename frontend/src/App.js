@@ -1,6 +1,5 @@
 import { BrowserRouter, Routes, Route, Link } from 'react-router-dom';
 import Register from './pages/Register';
-import Recognize from './pages/Recognize';
 import FLResults from './pages/FLResults';
 
 export default function App() {
@@ -8,13 +7,11 @@ export default function App() {
     <BrowserRouter>
       <nav style={styles.nav}>
         <Link to="/" style={styles.link}>Register</Link>
-        <Link to="/recognize" style={styles.link}>Recognize</Link>
-        {/* <Link to="/results" style={styles.link}>FL Results</Link> */}
+        <Link to="/results" style={styles.link}>FL Results</Link>
       </nav>
       <Routes>
         <Route path="/" element={<Register />} />
-        <Route path="/recognize" element={<Recognize />} />
-        {/* <Route path="/results" element={<FLResults />} /> */}
+        <Route path="/results" element={<FLResults />} />
       </Routes>
     </BrowserRouter>
   );
