@@ -114,6 +114,47 @@ class PrivacyMonitor:
         return self.epsilon_history.copy()
 
 
+def _freeze_backbone_for_dp(model: torch.nn.Module) -> int:
+    """
+    Freeze all layers except the final linear + BN head of InceptionResnetV1.
+
+    WHY THIS IS NEEDED:
+        Opacus (DP-SGD) stores one gradient tensor PER SAMPLE PER TRAINABLE
+        PARAMETER. InceptionResnetV1 has ~28M trainable parameters. With 2
+        clients running simultaneously, that is 2 × 28M gradient tensors —
+        easily exhausting 8-16GB of RAM before training even starts.
+
+        Freezing the backbone reduces trainable params to ~260K (last_linear +
+        last_bn only), cutting Opacus memory by ~100x. The backbone already has
+        high-quality VGGFace2 pretrained weights, so fine-tuning only the head
+        is standard practice in DP federated learning.
+
+    Returns:
+        Number of trainable parameters after freezing.
+    """
+    # Freeze everything first
+    for p in model.parameters():
+        p.requires_grad = False
+
+    # Unfreeze only last_linear and last_bn (the embedding projection head)
+    # These live at model.model.last_linear and model.model.last_bn
+    inner = getattr(model, "model", model)  # unwrap GlobalFaceModel if needed
+    unfrozen_layers = []
+    for name in ["last_linear", "last_bn"]:
+        layer = getattr(inner, name, None)
+        if layer is not None:
+            for p in layer.parameters():
+                p.requires_grad = True
+            unfrozen_layers.append(name)
+
+    trainable_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(
+        f"[DP Backbone Freeze] Frozen all layers. Training only: {unfrozen_layers}. "
+        f"Trainable params: {trainable_count:,}"
+    )
+    return trainable_count
+
+
 def make_private_with_dp(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
@@ -125,6 +166,7 @@ def make_private_with_dp(
     random_seed: Optional[int] = None,
     batch_memory_manager: bool = False,
     client_id: str = "unknown",
+    freeze_backbone: bool = True,
 ) -> Tuple[torch.nn.Module, torch.optim.Optimizer, object, PrivacyEngine, PrivacyMonitor]:
     """
     Wrap a model, optimizer, and data loader with Differential Privacy (DP-SGD).
@@ -182,11 +224,28 @@ def make_private_with_dp(
 
     logger.info(f"[Client-Side] Initializing DP on {client_id}")
 
+    # MEMORY FIX: Freeze backbone before Opacus wraps the model.
+    # Opacus allocates per-sample gradient buffers for every trainable param.
+    # With a 28M-param model and 2 clients running in parallel this causes OOM.
+    # Freezing reduces trainable params to ~260K (head only) — a ~100x reduction.
+    if freeze_backbone:
+        _freeze_backbone_for_dp(model)
+
     privacy_engine = PrivacyEngine()
+
+    # Opacus doesn't support BatchNorm. Auto-replace with GroupNorm before calling make_private.
+    from opacus.validators import ModuleValidator
+    model = ModuleValidator.fix(model)
+
+    # ModuleValidator.fix() may return a new module instance, so rebuild the
+    # optimizer against the validated model parameters before wrapping with Opacus.
+    optimizer_kwargs = dict(optimizer.defaults)
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    optimizer_private = optimizer.__class__(trainable_params, **optimizer_kwargs)
 
     model_private, optimizer_private, train_loader_private = privacy_engine.make_private(
         module=model,
-        optimizer=optimizer,
+        optimizer=optimizer_private,
         data_loader=train_loader,
         noise_multiplier=noise_multiplier,
         max_grad_norm=max_grad_norm,
@@ -201,6 +260,7 @@ def make_private_with_dp(
 
     privacy_monitor = PrivacyMonitor(epsilon_max=epsilon_max, delta=delta)
 
+    trainable_count = sum(p.numel() for p in model_private.parameters() if p.requires_grad)
     logger.info(f"[DP Configuration]")
     logger.info(f"  Client:          {client_id}")
     logger.info(f"  noise_multiplier = {noise_multiplier}")
@@ -208,6 +268,7 @@ def make_private_with_dp(
     logger.info(f"  target_delta     = {delta}")
     logger.info(f"  epsilon_max      = {epsilon_max}  (hard budget limit)")
     logger.info(f"  random_seed      = {random_seed}")
+    logger.info(f"  trainable_params = {trainable_count:,} (backbone frozen={freeze_backbone})")
 
     return model_private, optimizer_private, train_loader_private, privacy_engine, privacy_monitor
 
