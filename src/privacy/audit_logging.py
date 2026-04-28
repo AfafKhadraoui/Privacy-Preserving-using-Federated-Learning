@@ -29,37 +29,48 @@ class AuditLog:
         """
         Args:
             log_path: File path where the log will be written (e.g. results/metrics/audit.log)
+
+        Each call to __init__ starts a FRESH chain for this run.
+        Old log files are rotated (renamed with a timestamp) so past runs are
+        preserved but do not interfere with the new run's hash chain.
         """
         self.log_path = log_path
         self.entries = []
-        self.previous_hash = "0" * 64  # Genesis hash — the starting point of the chain
+        self.previous_hash = "0" * 64  # Genesis hash — starting point of every fresh chain
 
         os.makedirs(os.path.dirname(log_path) if os.path.dirname(log_path) else ".", exist_ok=True)
-        self._load_existing_entries()
+        self._rotate_old_log()
 
-    def _load_existing_entries(self) -> None:
+    def _rotate_old_log(self) -> None:
         """
-        Load existing log entries on startup so the hash chain continues correctly
-        across restarts (e.g. if server restarts mid-training).
+        Rotate any existing log file from a previous run.
+
+        WHY THIS MATTERS — The chain-breaking bug:
+            The old code appended new entries to the existing file but reset
+            previous_hash to the genesis hash (000...0). So the NEW run's first
+            entry would have previous_hash=000...0, but the last OLD entry had
+            a real hash. When verify_integrity walked from entry 0 it expected
+            each entry's previous_hash to equal the hash of the entry before it.
+            The first new entry would fail this check → "Chain broken at entry N".
+
+        THE FIX:
+            Rotate (rename) the old log so each run starts with an empty file
+            and a clean chain starting from genesis. Old logs are kept for
+            auditing purposes — they just live in a separate file.
         """
         if not os.path.exists(self.log_path):
             return
 
-        with open(self.log_path, "r", encoding="utf-8") as f:
-            for line_number, line in enumerate(f, start=1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    # FIX: Was silently skipping bad lines — now we warn loudly
-                    print(f"[Audit] WARNING: Could not parse line {line_number} in {self.log_path} — skipping corrupted entry")
-                    continue
-                self.entries.append(entry)
-
-        if self.entries and "hash" in self.entries[-1]:
-            self.previous_hash = self.entries[-1]["hash"]
+        # Rename the old log to <name>.<timestamp>.bak so it is preserved
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = f"{self.log_path}.{timestamp}.bak"
+        try:
+            os.rename(self.log_path, backup_path)
+            print(f"[Audit] Rotated previous log → {os.path.basename(backup_path)}")
+        except OSError as exc:
+            # If rotation fails (e.g. file locked), truncate in place as fallback
+            print(f"[Audit] WARNING: Could not rotate old log ({exc}). Truncating in place.")
+            open(self.log_path, "w").close()
 
     def log_event(
         self,
