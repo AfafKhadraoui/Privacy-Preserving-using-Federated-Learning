@@ -5,6 +5,71 @@ import numpy as np
 import json
 import matplotlib.pyplot as plt
 
+
+def membership_inference(model, clients_dir: str) -> dict:
+    """
+    Embedding-based membership inference using cosine similarity.
+
+    Intra-class similarity vs inter-class similarity. Members should
+    have higher intra-class similarity (same person) than inter-class.
+    """
+    model.eval()
+    all_embeddings = {}  # person_name -> list of numpy embeddings
+
+    for client_folder in os.listdir(clients_dir):
+        client_path = os.path.join(clients_dir, client_folder)
+        if not os.path.isdir(client_path):
+            continue
+        for person in os.listdir(client_path):
+            person_path = os.path.join(client_path, person)
+            if not os.path.isdir(person_path):
+                continue
+            embeddings = []
+            for f in os.listdir(person_path):
+                if f.endswith('.pt'):
+                    tensor = torch.load(os.path.join(person_path, f), map_location='cpu')
+                    if len(tensor.shape) == 3:
+                        tensor = tensor.unsqueeze(0)
+                    with torch.no_grad():
+                        emb = model(tensor).squeeze().cpu().numpy()
+                    # L2-normalize to get cosine similarity via dot product
+                    norm = np.linalg.norm(emb)
+                    if norm > 0:
+                        emb = emb / norm
+                    embeddings.append(emb)
+            if embeddings:
+                all_embeddings[person] = embeddings
+
+    intra_similarities = []
+    for person, embeds in all_embeddings.items():
+        if len(embeds) >= 2:
+            for i in range(len(embeds)):
+                for j in range(i+1, len(embeds)):
+                    sim = float(np.dot(embeds[i], embeds[j]))
+                    intra_similarities.append(sim)
+
+    inter_similarities = []
+    people = list(all_embeddings.keys())
+    for i in range(len(people)):
+        for j in range(i+1, len(people)):
+            e1 = all_embeddings[people[i]][0]
+            e2 = all_embeddings[people[j]][0]
+            sim = float(np.dot(e1, e2))
+            inter_similarities.append(sim)
+
+    intra_mean = float(np.mean(intra_similarities)) if intra_similarities else 0.0
+    inter_mean = float(np.mean(inter_similarities)) if inter_similarities else 0.0
+    separation = intra_mean - inter_mean
+
+    return {
+        "intra_mean": intra_mean,
+        "inter_mean": inter_mean,
+        "separation": separation,
+        "intra_similarities": intra_similarities,
+        "inter_similarities": inter_similarities,
+    }
+
+
 def evaluate_membership_inference(
     model,
     clients_dir: str,
@@ -128,8 +193,8 @@ def compare_membership_inference(
     output_path: str
 ) -> dict:
     
-    res_a = evaluate_membership_inference(model_no_dp, clients_dir)
-    res_b = evaluate_membership_inference(model_with_dp, clients_dir)
+    res_a = membership_inference(model_no_dp, clients_dir)
+    res_b = membership_inference(model_with_dp, clients_dir)
     
     # Interpretation text
     reduction = 0
