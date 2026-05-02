@@ -1,7 +1,6 @@
 import { BrowserRouter, Routes, Route, Link } from 'react-router-dom';
 import Register from './pages/Register';
 import Recognize from './pages/Recognize';
-import FLResults from './pages/FLResults';
 
 export default function App() {
   return (

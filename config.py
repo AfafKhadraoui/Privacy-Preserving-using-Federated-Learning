@@ -36,6 +36,22 @@ PRETRAINED     = "vggface2"
 # Recognition
 THRESHOLD = 0.6          # Distance threshold for face verification
 
+# Registration
+NUM_REGISTRATION_IMAGES = 3
+DEFAULT_REGISTRATION_IMAGE_INSTRUCTIONS = (
+    "Look straight",
+    "Turn left",
+    "Turn right",
+)
+if NUM_REGISTRATION_IMAGES < 1:
+    raise ValueError("NUM_REGISTRATION_IMAGES must be at least 1")
+REGISTRATION_IMAGE_INSTRUCTIONS = tuple(
+    DEFAULT_REGISTRATION_IMAGE_INSTRUCTIONS[idx]
+    if idx < len(DEFAULT_REGISTRATION_IMAGE_INSTRUCTIONS)
+    else f"Capture image {idx + 1}"
+    for idx in range(NUM_REGISTRATION_IMAGES)
+)
+
 # FL Server
 SERVER_ADDRESS = "127.0.0.1:8080"  # Since we're simulating on localhost
 
@@ -84,5 +100,8 @@ STYLEGAN_REPO_URL      = os.environ.get(
 	"STYLEGAN_REPO_URL",
 	"https://github.com/NVlabs/stylegan2-ada-pytorch/archive/refs/heads/main.zip",
 )
-STYLEGAN_IDENTITY_W = 1.0
-STYLEGAN_LATENT_REG_W = 0.001
+
+STYLEGAN_IDENTITY_W    = 1.0
+STYLEGAN_PERCEPTUAL_W  = 0.1
+STYLEGAN_LATENT_REG_W  = 0.001
+
