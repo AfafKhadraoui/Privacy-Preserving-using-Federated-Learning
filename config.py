@@ -60,19 +60,29 @@ MODEL_CENTRALIZED = os.path.join(MODELS_DIR, "model_centralized.pth")
 MODEL_NO_DP       = os.path.join(MODELS_DIR, "model_fl_no_dp.pth")    # The one we attack
 MODEL_WITH_DP     = os.path.join(MODELS_DIR, "model_fl_with_dp.pth")  # The one that resists the attack!
 
-# Attack
-ATTACK_ITERATIONS = 200
-ATTACK_LR         = 0.01
+# Attack (model inversion)
+# Pixel-space inversion needs thousands of steps; StyleGAN latent search also needs 1500+.
+ATTACK_ITERATIONS = 2500
+ATTACK_LR = 0.02
+# After preprocessing, which client folders to evaluate (different identities / test photos).
+ATTACK_EVAL_CLIENT_IDS = ("client_00", "client_01")
 
-# Optional StyleGAN inversion path
-# Set STYLEGAN_NETWORK_PKL to a pretrained FFHQ pickle (file path or URL).
-# STYLEGAN_REPO_DIR can be left empty; the code will fetch StyleGAN2-ADA on demand.
-STYLEGAN_NETWORK_PKL   = os.environ.get("STYLEGAN_NETWORK_PKL", "")
+# StyleGAN inversion (recommended for face-like inversions). dnnlib can load a URL or local .pkl.
+# Default: official StyleGAN2-ADA FFHQ checkpoint (~364 MB, cached after first download).
+# Override with a local path, e.g. STYLEGAN_NETWORK_PKL=D:\\models\\ffhq.pkl
+# Disable StyleGAN (pixel-space only): set STYLEGAN_NETWORK_PKL to empty, none, 0, or false.
+_stylegan_pkl_env = os.environ.get("STYLEGAN_NETWORK_PKL")
+if _stylegan_pkl_env is None:
+    STYLEGAN_NETWORK_PKL = (
+        "https://nvlabs-fi-cdn.nvidia.com/stylegan2-ada-pytorch/pretrained/ffhq.pkl"
+    )
+else:
+    _s = _stylegan_pkl_env.strip()
+    STYLEGAN_NETWORK_PKL = "" if _s.lower() in ("", "none", "0", "false") else _s
 STYLEGAN_REPO_DIR      = os.environ.get("STYLEGAN_REPO_DIR", "")
 STYLEGAN_REPO_URL      = os.environ.get(
 	"STYLEGAN_REPO_URL",
 	"https://github.com/NVlabs/stylegan2-ada-pytorch/archive/refs/heads/main.zip",
 )
-STYLEGAN_IDENTITY_W    = 1.0
-STYLEGAN_PERCEPTUAL_W  = 0.1
-STYLEGAN_LATENT_REG_W  = 0.001
+STYLEGAN_IDENTITY_W = 1.0
+STYLEGAN_LATENT_REG_W = 0.001

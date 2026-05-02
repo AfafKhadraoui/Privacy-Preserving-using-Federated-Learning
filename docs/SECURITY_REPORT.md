@@ -592,11 +592,6 @@ Demonstrate that **Differential Privacy effectively protects** against model inv
 
 ### 8.2 Attack Types (Planned)
 
-**Membership Inference Attack** (`src/attacks/membership_inference.py`):
-
-- Determines if specific person's face was in training data
-- DP should make this indistinguishable
-
 **Model Inversion Attack** (`src/attacks/model_inversion.py`):
 
 - Reconstructs training faces from model weights
@@ -769,7 +764,6 @@ THRESHOLD = 0.6              # Recognition confidence threshold
 
 2. **Attack Implementation**
    - Model inversion attack (to show DP prevents it)
-   - Membership inference attack
    - Side-by-side comparison (Version A vs B)
 
 3. **End-to-End Encryption Wiring**
@@ -885,17 +879,7 @@ experiments/
 - Gradient clipping bounds per-sample influence
 - Privacy budget monitoring enforces theoretical limits
 
-### Threat 2: Membership Inference
-
-**Risk**: Determine if specific person was in training
-
-**Mitigation**:
-
-- DP-SGD adds uncertainty to all gradients
-- Epsilon budget limits information leakage
-- Indistinguishability guarantee of DP
-
-### Threat 3: Man-in-the-Middle (MITM) Attack
+### Threat 2: Man-in-the-Middle (MITM) Attack
 
 **Risk**: Intercept and modify model updates in transit
 
@@ -906,7 +890,7 @@ experiments/
 - Server rejects unsigned/tampered updates
 - TLS/HTTPS for API layer
 
-### Threat 4: Unauthorized Client
+### Threat 3: Unauthorized Client
 
 **Risk**: Rogue device joins FL training
 
@@ -917,7 +901,7 @@ experiments/
 - Public key registration on server
 - Security alerts on unknown clients
 
-### Threat 5: Compromised Server
+### Threat 4: Compromised Server
 
 **Risk**: Server reads individual client updates
 
@@ -928,7 +912,7 @@ experiments/
 - Individual updates never inspectable
 - (SecAgg pending full activation)
 
-### Threat 6: Privacy Budget Exhaustion
+### Threat 5: Privacy Budget Exhaustion
 
 **Risk**: Training runs indefinitely, epsilon → ∞
 
@@ -939,7 +923,7 @@ experiments/
 - Per-round monitoring with 80% warning
 - Immutable epsilon history in audit log
 
-### Threat 7: Audit Log Tampering
+### Threat 6: Audit Log Tampering
 
 **Risk**: Security events modified/deleted
 
