@@ -61,5 +61,18 @@ MODEL_NO_DP       = os.path.join(MODELS_DIR, "model_fl_no_dp.pth")    # The one 
 MODEL_WITH_DP     = os.path.join(MODELS_DIR, "model_fl_with_dp.pth")  # The one that resists the attack!
 
 # Attack
-ATTACK_ITERATIONS = 1000
+ATTACK_ITERATIONS = 200
 ATTACK_LR         = 0.01
+
+# Optional StyleGAN inversion path
+# Set STYLEGAN_NETWORK_PKL to a pretrained FFHQ pickle (file path or URL).
+# STYLEGAN_REPO_DIR can be left empty; the code will fetch StyleGAN2-ADA on demand.
+STYLEGAN_NETWORK_PKL   = os.environ.get("STYLEGAN_NETWORK_PKL", "")
+STYLEGAN_REPO_DIR      = os.environ.get("STYLEGAN_REPO_DIR", "")
+STYLEGAN_REPO_URL      = os.environ.get(
+	"STYLEGAN_REPO_URL",
+	"https://github.com/NVlabs/stylegan2-ada-pytorch/archive/refs/heads/main.zip",
+)
+STYLEGAN_IDENTITY_W    = 1.0
+STYLEGAN_PERCEPTUAL_W  = 0.1
+STYLEGAN_LATENT_REG_W  = 0.001
