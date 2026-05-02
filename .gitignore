@@ -19,4 +19,5 @@ data/
 /.venv
 /face-recog/
 /results/metrics/
+/results/plots/
 frontend/node_modules/

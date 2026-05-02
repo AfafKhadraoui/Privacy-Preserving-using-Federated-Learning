@@ -56,36 +56,50 @@ def process_and_register_locally(client_id: str, image_paths: list) -> torch.Ten
     """
     1. Preprocesses images and saves them locally for FL training.
     2. Calls /api/register to get the global model.
-    3. Generates embedding locally using the global model.
+    3. Generates embeddings locally using the global model and averages them.
     4. Calls /api/register_update to send the embedding and trigger FL.
     """
     client_id = client_id.strip()
+    if not image_paths:
+        raise ValueError("At least one registration image is required.")
+
     client_dir = os.path.join(proj_cfg.CLIENTS_DIR, f"client_{client_id}")
     os.makedirs(client_dir, exist_ok=True)
     
     saved_tensors = []
+    face_tensors = []
     
     # 1. Preprocess
-    for idx, img_path in enumerate(image_paths):
+    for img_path in image_paths:
         face_tensor = detect_face(img_path, mtcnn, check_blur=False)
         if face_tensor is not None:
-            tensor_path = os.path.join(client_dir, f"face_{idx}.pt")
-            torch.save(face_tensor, tensor_path)
-            saved_tensors.append(tensor_path)
+            face_tensors.append(face_tensor)
             
-    if not saved_tensors:
-        raise ValueError("No valid faces detected in the provided images.")
+    if len(face_tensors) != len(image_paths):
+        raise ValueError(
+            f"Detected valid faces in {len(face_tensors)} of {len(image_paths)} registration images."
+        )
+
+    for file_name in os.listdir(client_dir):
+        if file_name.startswith("face_") and file_name.endswith(".pt"):
+            os.remove(os.path.join(client_dir, file_name))
+
+    for idx, face_tensor in enumerate(face_tensors):
+        tensor_path = os.path.join(client_dir, f"face_{idx}.pt")
+        torch.save(face_tensor, tensor_path)
+        saved_tensors.append(tensor_path)
         
     # 2. Fetch global model via API instead of reading from disk
     model = fetch_global_model(client_id, mode="eval")
     
-    # 3. Generate Embedding directly locally
+    # 3. Generate embeddings locally and aggregate them for registration.
     with torch.no_grad():
-        anchor_tensor = torch.load(saved_tensors[0]).unsqueeze(0)
-        embedding = model(anchor_tensor)
+        face_batch = torch.stack(face_tensors)
+        embeddings = model(face_batch)
+        embedding = embeddings.mean(dim=0)
 
     # Store locally for V2
-    store_local_embedding(client_id, embedding.squeeze())
+    store_local_embedding(client_id, embedding)
 
     # Get privacy version
     res_health = requests.get(f"{API_BASE_URL}/api/health")
@@ -97,7 +111,7 @@ def process_and_register_locally(client_id: str, image_paths: list) -> torch.Ten
         "num_samples": len(saved_tensors)
     }
     if priv_ver == 1:
-        payload["embedding"] = embedding.squeeze().tolist()
+        payload["embedding"] = embedding.tolist()
 
     res = requests.post(f"{API_BASE_URL}/api/register_update", data={"payload": json.dumps(payload)})
     if res.status_code != 200:
