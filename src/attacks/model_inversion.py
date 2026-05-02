@@ -2,6 +2,7 @@ import os
 import sys
 import zipfile
 import tempfile
+import hashlib
 import urllib.request
 from typing import Optional
 import torch
@@ -24,6 +25,7 @@ from config import (
 from src.model.face_model import get_model
 
 FACENET_INPUT = 160
+STYLEGAN_DOWNLOAD_TIMEOUT_S = 60
 
 
 def _downsample_for_facenet(x: torch.Tensor, size: int = FACENET_INPUT) -> torch.Tensor:
@@ -160,10 +162,69 @@ def load_face_prior(
     return prior.clamp(-1.0, 1.0)
 
 
+def _download_with_timeout(url: str, dest_path: str, timeout_s: int = STYLEGAN_DOWNLOAD_TIMEOUT_S) -> None:
+    """Download a file with an explicit timeout and a temporary file for atomic replacement."""
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    temp_path = f"{dest_path}.tmp"
+
+    try:
+        with urllib.request.urlopen(url, timeout=timeout_s) as response, open(temp_path, "wb") as handle:
+            chunk_size = 1024 * 1024
+            content_length = response.headers.get("Content-Length")
+            total_bytes = int(content_length) if content_length and content_length.isdigit() else None
+            downloaded = 0
+
+            while True:
+                chunk = response.read(chunk_size)
+                if not chunk:
+                    break
+                handle.write(chunk)
+                downloaded += len(chunk)
+                if total_bytes:
+                    percent = (100.0 * downloaded) / total_bytes
+                    print(f"      download progress: {percent:5.1f}%", end="\r", flush=True)
+
+        if total_bytes:
+            print(" " * 60, end="\r", flush=True)
+    except Exception as exc:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"Failed to download {url} within {timeout_s}s. Check internet, proxy, or firewall settings."
+        ) from exc
+
+    os.replace(temp_path, dest_path)
+
+
+def _ensure_stylegan_checkpoint(network_pkl: str, timeout_s: int = STYLEGAN_DOWNLOAD_TIMEOUT_S) -> str:
+    """Ensure the StyleGAN checkpoint is present locally and return the file path used by dnnlib."""
+    if not str(network_pkl).lower().startswith(("http://", "https://")):
+        return network_pkl
+
+    cache_root = os.path.join(tempfile.gettempdir(), "stylegan2-ada-pytorch-cache", "checkpoints")
+    os.makedirs(cache_root, exist_ok=True)
+
+    url_hash = hashlib.md5(network_pkl.encode("utf-8")).hexdigest()
+    ext = os.path.splitext(network_pkl)[1] or ".pkl"
+    cached_path = os.path.join(cache_root, f"{url_hash}{ext}")
+
+    if os.path.exists(cached_path):
+        return cached_path
+
+    print(f"    Downloading StyleGAN checkpoint to cache: {cached_path}")
+    _download_with_timeout(network_pkl, cached_path, timeout_s=timeout_s)
+    return cached_path
+
+
 def load_stylegan_generator(network_pkl: str, stylegan_repo_dir: Optional[str] = None, device: str = "cpu"):
     """Load a pretrained StyleGAN2/StyleGAN3 generator from an official NVLabs pickle."""
+    print("    [StyleGAN] Preparing generator...")
     repo_dir = stylegan_repo_dir
     if not repo_dir or not os.path.exists(repo_dir):
+        print("    [StyleGAN] Ensuring repo cache...")
         repo_dir = _ensure_stylegan_repo()
 
     if repo_dir and repo_dir not in sys.path:
@@ -177,7 +238,9 @@ def load_stylegan_generator(network_pkl: str, stylegan_repo_dir: Optional[str] =
             "StyleGAN loading requires the NVLabs StyleGAN repo code on sys.path."
         ) from exc
 
-    with dnnlib.util.open_url(network_pkl) as fp:
+    checkpoint_path = _ensure_stylegan_checkpoint(network_pkl)
+    print(f"    [StyleGAN] Loading checkpoint: {checkpoint_path}")
+    with dnnlib.util.open_url(checkpoint_path) as fp:
         network_data = legacy.load_network_pkl(fp)
 
     generator = network_data["G_ema"].to(device)
@@ -198,8 +261,8 @@ def _ensure_stylegan_repo() -> str:
     archive_path = os.path.join(cache_root, "stylegan2-ada-pytorch-main.zip")
 
     if not os.path.exists(archive_path):
-        with urllib.request.urlopen(STYLEGAN_REPO_URL) as response, open(archive_path, "wb") as handle:
-            handle.write(response.read())
+        print(f"    Downloading StyleGAN repo archive: {STYLEGAN_REPO_URL}")
+        _download_with_timeout(STYLEGAN_REPO_URL, archive_path)
 
     with zipfile.ZipFile(archive_path, "r") as archive:
         archive.extractall(cache_root)
@@ -460,7 +523,7 @@ def attack_both_models(
         prior = CROPPED_DIR
 
     print(
-        "  [Attack] Embedding-only inversion (StyleGAN/pixel; no victim pixels in loss)."
+        "  [Attack] Embedding-only inversion (pixel-space; no victim pixels in loss)."
     )
 
     def run_one_attack(
@@ -470,26 +533,7 @@ def attack_both_models(
         out_png: str,
         prior_exclude_prefixes: list,
     ) -> tuple[torch.Tensor, float]:
-        if stylegan_ckpt:
-            print(f"    {caption}: StyleGAN latent inversion ({iterations} iters, lr={attack_lr})")
-            generator = load_stylegan_generator(
-                stylegan_ckpt,
-                stylegan_repo_dir=repo_dir_effective,
-                device=infer_device,
-            )
-            img, loss_val, _ = run_stylegan_inversion_attack(
-                model=model,
-                target_embedding=embedding,
-                generator=generator,
-                iterations=iterations,
-                lr=attack_lr,
-                identity_weight=STYLEGAN_IDENTITY_W,
-                latent_reg_weight=STYLEGAN_LATENT_REG_W,
-                save_path=out_png,
-                seed=random_seed,
-            )
-            return img, loss_val
-
+        # StyleGAN disabled: use pixel-space inversion only
         print(f"    {caption}: pixel-space inversion ({iterations} iters, lr={attack_lr})")
         img, loss_val = run_inversion_attack(
             model,

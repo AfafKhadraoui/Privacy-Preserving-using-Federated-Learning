@@ -144,27 +144,7 @@ def main():
 
     print("=" * 60)
 
-    if STYLEGAN_NETWORK_PKL and str(STYLEGAN_NETWORK_PKL).strip():
-
-        print(f"Using StyleGAN: {STYLEGAN_NETWORK_PKL}")
-
-        if str(STYLEGAN_NETWORK_PKL).lower().startswith("http"):
-
-            print(
-
-                "(First run may download ~364 MB; dnnlib caches the pickle.)"
-
-            )
-
-    else:
-
-        print(
-
-            "StyleGAN disabled (STYLEGAN_NETWORK_PKL empty/none): pixel-space inversion "
-
-            "(CROPPED_DIR prior skips the victim client folder)."
-
-        )
+    print("Attack method: pixel-space inversion (StyleGAN disabled)")
 
 
 
