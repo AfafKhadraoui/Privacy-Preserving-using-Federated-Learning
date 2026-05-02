@@ -83,23 +83,11 @@ ATTACK_LR = 0.02
 # After preprocessing, which client folders to evaluate (different identities / test photos).
 ATTACK_EVAL_CLIENT_IDS = ("client_00", "client_01")
 
-# StyleGAN inversion (recommended for face-like inversions). dnnlib can load a URL or local .pkl.
-# Default: official StyleGAN2-ADA FFHQ checkpoint (~364 MB, cached after first download).
-# Override with a local path, e.g. STYLEGAN_NETWORK_PKL=D:\\models\\ffhq.pkl
-# Disable StyleGAN (pixel-space only): set STYLEGAN_NETWORK_PKL to empty, none, 0, or false.
-_stylegan_pkl_env = os.environ.get("STYLEGAN_NETWORK_PKL")
-if _stylegan_pkl_env is None:
-    STYLEGAN_NETWORK_PKL = (
-        "https://nvlabs-fi-cdn.nvidia.com/stylegan2-ada-pytorch/pretrained/ffhq.pkl"
-    )
-else:
-    _s = _stylegan_pkl_env.strip()
-    STYLEGAN_NETWORK_PKL = "" if _s.lower() in ("", "none", "0", "false") else _s
-STYLEGAN_REPO_DIR      = os.environ.get("STYLEGAN_REPO_DIR", "")
-STYLEGAN_REPO_URL      = os.environ.get(
-	"STYLEGAN_REPO_URL",
-	"https://github.com/NVlabs/stylegan2-ada-pytorch/archive/refs/heads/main.zip",
-)
+# StyleGAN inversion (recommended for face-like inversions).
+# The attack always uses the official NVLabs-hosted checkpoint and repo URL below.
+STYLEGAN_NETWORK_PKL = "https://nvlabs-fi-cdn.nvidia.com/stylegan2-ada-pytorch/pretrained/ffhq.pkl"
+STYLEGAN_REPO_DIR = ""
+STYLEGAN_REPO_URL = "https://github.com/NVlabs/stylegan2-ada-pytorch/archive/refs/heads/main.zip"
 
 STYLEGAN_IDENTITY_W    = 1.0
 STYLEGAN_PERCEPTUAL_W  = 0.1
