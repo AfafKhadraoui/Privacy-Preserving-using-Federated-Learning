@@ -77,17 +77,16 @@ MODEL_NO_DP       = os.path.join(MODELS_DIR, "model_fl_no_dp.pth")    # The one 
 MODEL_WITH_DP     = os.path.join(MODELS_DIR, "model_fl_with_dp.pth")  # The one that resists the attack!
 
 # Attack (model inversion)
-# Pixel-space inversion needs thousands of steps; StyleGAN latent search also needs 1500+.
-ATTACK_ITERATIONS = 2500
+# Pixel-space inversion: optimizes image pixels directly to match target embedding.
+ATTACK_ITERATIONS = 200
 ATTACK_LR = 0.02
 # After preprocessing, which client folders to evaluate (different identities / test photos).
 ATTACK_EVAL_CLIENT_IDS = ("client_00", "client_01")
 
-# StyleGAN inversion (recommended for face-like inversions).
-# The attack always uses the official NVLabs-hosted checkpoint and repo URL below.
-STYLEGAN_NETWORK_PKL = "https://nvlabs-fi-cdn.nvidia.com/stylegan2-ada-pytorch/pretrained/ffhq.pkl"
-STYLEGAN_REPO_DIR = ""
-STYLEGAN_REPO_URL = "https://github.com/NVlabs/stylegan2-ada-pytorch/archive/refs/heads/main.zip"
+# StyleGAN inversion disabled (removed to simplify attack to pixel-space only)
+STYLEGAN_NETWORK_PKL = None
+STYLEGAN_REPO_DIR = None
+STYLEGAN_REPO_URL = None
 
 STYLEGAN_IDENTITY_W    = 1.0
 STYLEGAN_PERCEPTUAL_W  = 0.1

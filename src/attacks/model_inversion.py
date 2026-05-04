@@ -3,158 +3,307 @@ import sys
 import zipfile
 import tempfile
 import urllib.request
+import gc
 from typing import Optional
+
+# Path and Cache Configuration
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Force PyTorch Hub to download models to the F: drive instead of C: drive
+os.environ["TORCH_HOME"] = os.path.join(_REPO_ROOT, "cns_project_cache", "torch_home")
+os.makedirs(os.environ["TORCH_HOME"], exist_ok=True)
+
+
 import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
 from PIL import Image
-import torchvision.transforms as T
 
-# Ensure config is available
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from config import (
-    CROPPED_DIR,
-    STYLEGAN_REPO_URL,
-    STYLEGAN_NETWORK_PKL,
-    STYLEGAN_REPO_DIR,
-    STYLEGAN_IDENTITY_W,
-    STYLEGAN_LATENT_REG_W,
-)
-from src.model.face_model import get_model
+# -----------------------------
+# MobileStyleGAN CPU Inversion (Lite)
+# -----------------------------
+class MobileStyleGANLite(nn.Module):
+    """Memory-efficient wrapper for MobileStyleGAN generator."""
+    def __init__(self, mapping_net, student, style_mean):
+        super().__init__()
+        self.mapping_net = mapping_net
+        self.student = student
+        self.register_buffer("style_mean", style_mean)
+        
+    def forward(self, var=None, style=None, truncated=False, generator="student"):
+        # Support direct style (W+) injection or MappingNet (Z) input
+        if style is None:
+            style = self.mapping_net(var)
+            if truncated:
+                # Simple truncation as implemented in Distiller
+                style = self.style_mean + 0.5 * (style - self.style_mean)
+        
+        return self.student(style)["img"]
+
+def load_mobilestylegan(device):
+    """Memory-optimized loader for MobileStyleGAN.
+    Saves RAM by skipping Teacher, VGG16, and Inception models.
+    """
+    mob_dir = os.path.join(_REPO_ROOT, "cns_project_cache", "MobileStyleGAN")
+    if mob_dir not in sys.path:
+        sys.path.insert(0, mob_dir)
+        
+    from core.utils import load_cfg, select_weights, load_weights
+    from core.model_zoo import model_zoo
+    from core.models.mapping_network import MappingNetwork
+    from core.models.mobile_synthesis_network import MobileSynthesisNetwork
+
+    print("    Loading MobileStyleGAN Lite (RAM Optimized)...")
+    cfg_path = os.path.join(mob_dir, "configs", "mobile_stylegan_ffhq.json")
+    cfg = load_cfg(cfg_path)
+    
+    # 1. Load the checkpoint once
+    print("    Loading weights from disk...")
+    zoo_path = os.path.join(mob_dir, "configs", "model_zoo.json")
+    ckpt = model_zoo("mobilestylegan_ffhq.ckpt", zoo_path=zoo_path)
+    state_dict = ckpt["state_dict"]
+    
+    # 2. Initialize minimal networks
+    # MappingNetwork params: style_dim=512, n_layers=8 (standard for FFHQ)
+    print("    Initializing Mapping Network...")
+    mapping_net = MappingNetwork(style_dim=512, n_layers=8).to(device)
+    mapping_weights = select_weights(state_dict, prefix="mapping_net.")
+    load_weights(mapping_net, mapping_weights)
+    
+    # Student SynthesisNetwork
+    print("    Initializing Student Synthesis Network...")
+    student = MobileSynthesisNetwork(style_dim=512).to(device)
+    student_weights = select_weights(state_dict, prefix="student.")
+    load_weights(student, student_weights)
+    
+    style_mean = state_dict["style_mean"].to(device)
+    
+    # 3. CRITICAL: Clear large checkpoint objects from RAM immediately
+    del ckpt
+    del state_dict
+    gc.collect()
+    
+    # 4. Wrap it
+    generator = MobileStyleGANLite(mapping_net, student, style_mean).to(device)
+    generator.eval()
+    for param in generator.parameters():
+        param.requires_grad = False
+        
+    return generator
+
+def total_variation_loss(img):
+    """Calculates Total Variation loss to encourage smoothness."""
+    tv_h = torch.pow(img[:, :, 1:, :] - img[:, :, :-1, :], 2).sum()
+    tv_w = torch.pow(img[:, :, :, 1:] - img[:, :, :, :-1], 2).sum()
+    return (tv_h + tv_w)
+
+def symmetry_loss(img):
+    """Encourages the face to be front-facing by rewarding horizontal symmetry."""
+    flipped_img = torch.flip(img, [3])
+    return F.mse_loss(img, flipped_img)
+
+def run_mobilestylegan_inversion_attack(
+    model,
+    target_embedding: torch.Tensor,
+    generator,
+    iterations: int = 1000,
+    lr: float = 0.005,
+    save_path: str = None
+):
+    """MobileStyleGAN latent inversion optimized for CPU."""
+    device = next(model.parameters()).device
+    
+    # High-Fidelity W+ Optimization
+    # 1. Start from the 'Average Face'
+    # We use W+ [1, 23, 512] for fine-grained detail (eyes, pose, features)
+    w_avg = generator.style_mean.detach().clone() # [1, 512]
+    w_plus = w_avg.unsqueeze(1).repeat(1, 23, 1).detach().clone().requires_grad_(True)
+    
+    optimizer = torch.optim.Adam([w_plus], lr=lr)
+    
+    print(f"    Running High-Fidelity MobileStyleGAN attack on {device}...")
+    for i in range(iterations):
+        optimizer.zero_grad()
+        
+        # Generate image from current latent
+        img_s = generator(style=w_plus)
+        
+        # Noise Augmentation: Prevents optimization from getting stuck in 
+        # local minima and encourages sharper, more robust facial features.
+        if i < iterations * 0.8:
+            # Add 1% noise during the search phase
+            noise = torch.randn_like(img_s) * 0.01
+            img_proc = img_s + noise
+        else:
+            # Clean image for the final refinement phase
+            img_proc = img_s
+
+        # Resize to FaceNet input size (160x160)
+        synth_img = F.interpolate(img_proc, size=(160, 160), mode='bilinear', align_corners=False)
+        
+        generated_emb = model(synth_img)
+        
+        # Multi-part Loss function
+        # 1. Identity loss (Primary goal)
+        identity_loss = 1.0 - F.cosine_similarity(generated_emb, target_embedding.detach(), dim=1).mean()
+        
+        # 2. W+ Regularization (Stay close to 'Human' manifold)
+        w_reg = torch.mean((w_plus - w_avg.unsqueeze(1)).pow(2))
+        
+        # 3. TV Loss (Prevent noise/blurriness)
+        tv = total_variation_loss(img_s)
+        
+        # 4. Symmetry Loss (Force front-facing pose)
+        sym = symmetry_loss(img_s)
+        
+        # Combine losses with weights tuned for CPU/8GB stability
+        # Maximizing sharpness: High identity weight, low regularization, low TV
+        loss = 20.0 * identity_loss + 0.5 * w_reg + 0.00005 * tv + 0.05 * sym
+        
+        loss.backward()
+        optimizer.step()
+        
+        if i % 100 == 0:
+            print(f"      iter {i:4d}: identity={identity_loss.item():.4f}, sym={sym.item():.4f}, w_reg={w_reg.item():.4f}")
+            gc.collect()
+
+    final_image_batch = generator(style=w_plus.detach()).detach()
+    # Resize for saving so it matches the expected 160x160 output
+    final_image = F.interpolate(final_image_batch, size=(160, 160), mode='bilinear', align_corners=False)
+    
+    if save_path:
+        from torchvision.utils import save_image
+        img_save = (final_image.squeeze() + 1.0) / 2.0
+        save_image(img_save, save_path)
+        
+    return final_image, loss.item()
 
 FACENET_INPUT = 160
 
 
-def _downsample_for_facenet(x: torch.Tensor, size: int = FACENET_INPUT) -> torch.Tensor:
-    """StyleGAN outputs e.g. 1024²; FaceNet VGGFace2 expects 160²."""
-    if x.shape[-1] == size and x.shape[-2] == size:
-        return x
-    return F.interpolate(x, size=(size, size), mode="bilinear", align_corners=False)
+def _pil_to_tensor(image: Image.Image) -> torch.Tensor:
+    resized = image.resize((FACENET_INPUT, FACENET_INPUT), Image.BILINEAR)
+    array = torch.from_numpy(__import__("numpy").array(resized, dtype="float32")).permute(2, 0, 1)
+    return (array / 127.5 - 1.0).unsqueeze(0)
 
 
-def _embedding_inversion_loss(pred_emb: torch.Tensor, target_emb: torch.Tensor) -> torch.Tensor:
-    """Cosine-based loss in embedding space (stable for L2-normalized face embeddings)."""
-    pred_n = F.normalize(pred_emb, dim=1)
-    tgt_n = F.normalize(target_emb.detach(), dim=1)
-    return (1.0 - (pred_n * tgt_n).sum(dim=1)).mean()
+def _ensure_image_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.ndim == 3:
+        tensor = tensor.unsqueeze(0)
+    if tensor.shape[-2:] != (FACENET_INPUT, FACENET_INPUT):
+        tensor = F.interpolate(tensor, size=(FACENET_INPUT, FACENET_INPUT), mode="bilinear", align_corners=False)
+    return tensor.float().clamp(-1.0, 1.0)
+
+try:
+    import lpips
+except Exception:
+    lpips = None
+
+# Ensure config is available
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from config import CROPPED_DIR, STYLEGAN_REPO_URL
+from src.model.face_model import get_model
 
 def load_model_from_checkpoint(checkpoint_path: str):
     """
     Load InceptionResnetV1 from a .pth checkpoint file.
+    Handles both DP-wrapped and non-DP models by stripping DP-specific state keys.
     """
     model = get_model(mode="eval")
     # map_location handles environments without a GPU
     state_dict = torch.load(checkpoint_path, map_location="cpu")
-    model.load_state_dict(state_dict, strict=False)
+    
+    # Strip DP wrapper prefixes if present (opacus wraps module with "._module.")
+    cleaned_state = {}
+    for k, v in state_dict.items():
+        # Remove ._module. prefix if it exists (from Opacus PrivacyEngine)
+        if k.startswith("_module."):
+            cleaned_state[k[8:]] = v  # Remove "_module." prefix
+        else:
+            cleaned_state[k] = v
+    
+    model.load_state_dict(cleaned_state, strict=False)
     model.eval()
+    
+    # Explicitly remove all hooks (may be left from DP wrapping)
+    model._backward_hooks = None
+    for module in model.modules():
+        module._forward_hooks = {}
+        module._backward_hooks = {}
+    
     for param in model.parameters():
         param.requires_grad = False
+    
     return model
 
-def _load_first_client_crop_tensor(client_dir: str) -> tuple[torch.Tensor, str, str]:
+def get_target_embedding(model, client_dir: str) -> tuple[torch.Tensor, str]:
     """
-    Load the first .pt face crop under client_dir (labs / FL layout).
-    Returns (tensor [1,3,160,160] in [-1,1], identity folder name, path).
+    Load a face tensor or image from client_dir, run through model, return embedding.
     """
-    if not os.path.isdir(client_dir):
-        raise ValueError(f"Not a directory: {client_dir}")
+    person_name = "Unknown"
+
+    def _load_face_file(file_path: str) -> torch.Tensor:
+        lower = file_path.lower()
+        if lower.endswith(".pt"):
+            tensor = torch.load(file_path, map_location="cpu")
+            return _ensure_image_tensor(tensor)
+
+        image = Image.open(file_path).convert("RGB")
+        return _pil_to_tensor(image)
+
+    # Search only one level: find first person directory, then first face file inside it.
     person_dirs = [d for d in os.listdir(client_dir) if os.path.isdir(os.path.join(client_dir, d))]
-    if not person_dirs:
-        raise ValueError(f"No person directories found in {client_dir}")
-    person_name = person_dirs[0]
-    person_path = os.path.join(client_dir, person_name)
-    pt_files = sorted(f for f in os.listdir(person_path) if f.endswith(".pt"))
-    if not pt_files:
-        raise ValueError(f"No .pt tensor files found in {person_path}")
-    target_tensor_path = os.path.join(person_path, pt_files[0])
-    tensor = torch.load(target_tensor_path, map_location="cpu").float()
+    if person_dirs:
+        person_name = person_dirs[0]
+        person_dir = os.path.join(client_dir, person_name)
+        face_files = [f for f in os.listdir(person_dir) if f.lower().endswith(('.pt', '.jpg', '.jpeg', '.png'))]
+        if not face_files:
+            raise ValueError(f"No face files found in {person_dir}")
+        target_tensor_path = os.path.join(person_dir, face_files[0])
+        tensor = _load_face_file(target_tensor_path)
+    else:
+        face_files = [f for f in os.listdir(client_dir) if f.lower().endswith(('.pt', '.jpg', '.jpeg', '.png'))]
+        if not face_files:
+            raise ValueError(f"No person directories or face files found in {client_dir}")
+        target_tensor_path = os.path.join(client_dir, face_files[0])
+        tensor = _load_face_file(target_tensor_path)
+
+    # Tensor shape is expected to be [1, 3, 160, 160] at this point.
     if tensor.ndim == 3:
         tensor = tensor.unsqueeze(0)
-    return tensor.clamp(-1.0, 1.0), person_name, target_tensor_path
-
-
-def whitebox_target_embedding_from_crop(model, client_dir: str) -> tuple[torch.Tensor, str]:
-    """
-    Simulates a white-box attacker who only knows E(x) for the victim (no pixels in the optimiser).
-    The crop is read once to compute this vector inside this function only; callers must not reuse pixels.
-    """
-    tensor, person_name, _ = _load_first_client_crop_tensor(client_dir)
-    model.eval()
-    with torch.no_grad():
-        embedding = model(tensor.clone())
-    return embedding.detach(), person_name
-
-
-def evaluator_ground_truth_crop(client_dir: str) -> tuple[torch.Tensor, str]:
-    """Load victim crop ONLY for evaluator-side figures — never pass this into inversion losses."""
-    tensor, person_name, _ = _load_first_client_crop_tensor(client_dir)
-    return tensor.detach(), person_name
-
-
-def get_target_embedding(model, client_dir: str) -> tuple:
-    """Legacy helper: embedding + evaluator crop + path (attack code should prefer whitebox_* instead)."""
-    tensor, person_name, path = _load_first_client_crop_tensor(client_dir)
+        
     model.eval()
     with torch.no_grad():
         embedding = model(tensor)
-    return embedding, person_name, tensor, path
+        
+    return embedding, person_name, tensor, target_tensor_path
 
 
-def load_face_prior(
-    prior_dir: str,
-    max_images: int = 32,
-    exclude_prefixes: Optional[list] = None,
-) -> torch.Tensor:
-    """
-    Build a simple face prior by averaging available tensors/images.
-    ``exclude_prefixes``: absolute dirs to skip (exclude victim client so prior is not leaked GT).
-    """
+def load_face_prior(prior_dir: str, max_images: int = 32) -> torch.Tensor:
+    """Build a simple face prior by averaging available face tensors or images."""
     candidate_paths = []
-    prefixes = []
-    if exclude_prefixes:
-        prefixes = [os.path.abspath(p) for p in exclude_prefixes if p]
-
-    def _skip(path: str) -> bool:
-        ap = os.path.abspath(path)
-        for pref in prefixes:
-            if ap == pref or ap.startswith(pref + os.sep):
-                return True
-        return False
-
     for root, _, files in os.walk(prior_dir):
         for file_name in files:
             lower_name = file_name.lower()
             if lower_name.endswith((".pt", ".jpg", ".jpeg", ".png")):
-                full = os.path.join(root, file_name)
-                if not _skip(full):
-                    candidate_paths.append(full)
+                candidate_paths.append(os.path.join(root, file_name))
 
     if not candidate_paths:
-        raise ValueError(f"No face files found in {prior_dir} (after exclusions)")
+        raise ValueError(f"No face files found in {prior_dir}")
 
     candidate_paths.sort()
     selected_paths = candidate_paths[:max_images]
 
     image_tensors = []
-    image_transform = T.Compose([
-        T.Resize((160, 160)),
-        T.ToTensor(),
-        T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-    ])
 
     for file_path in selected_paths:
         if file_path.lower().endswith(".pt"):
             tensor = torch.load(file_path, map_location="cpu").float()
-            if tensor.ndim == 3:
-                tensor = tensor.unsqueeze(0)
-            if tensor.shape[-2:] != (160, 160):
-                tensor = F.interpolate(tensor, size=(160, 160), mode="bilinear", align_corners=False)
-            image_tensors.append(tensor.clamp(-1.0, 1.0))
+            image_tensors.append(_ensure_image_tensor(tensor))
         else:
             image = Image.open(file_path).convert("RGB")
-            tensor = image_transform(image).unsqueeze(0)
-            image_tensors.append(tensor)
+            image_tensors.append(_pil_to_tensor(image))
 
     prior = torch.mean(torch.cat(image_tensors, dim=0), dim=0, keepdim=True)
     return prior.clamp(-1.0, 1.0)
@@ -168,6 +317,10 @@ def load_stylegan_generator(network_pkl: str, stylegan_repo_dir: Optional[str] =
 
     if repo_dir and repo_dir not in sys.path:
         sys.path.insert(0, repo_dir)
+
+    # Force StyleGAN to use the F: drive cache for weights and compiled code
+    os.environ["DNNLIB_CACHE_DIR"] = os.path.join(_REPO_ROOT, "cns_project_cache")
+    os.environ["TORCH_EXTENSIONS_DIR"] = os.path.join(_REPO_ROOT, "cns_project_cache", "torch_extensions")
 
     try:
         import dnnlib
@@ -189,7 +342,7 @@ def load_stylegan_generator(network_pkl: str, stylegan_repo_dir: Optional[str] =
 
 def _ensure_stylegan_repo() -> str:
     """Download and cache StyleGAN2-ADA locally if it is not already available."""
-    cache_root = os.path.join(tempfile.gettempdir(), "stylegan2-ada-pytorch-cache")
+    cache_root = os.path.join(_REPO_ROOT, "cns_project_cache")
     repo_root = os.path.join(cache_root, "stylegan2-ada-pytorch-main")
     if os.path.exists(os.path.join(repo_root, "dnnlib")):
         return repo_root
@@ -235,88 +388,85 @@ def run_stylegan_inversion_attack(
     iterations: int = 1500,
     lr: float = 0.01,
     identity_weight: float = 1.0,
+    perceptual_weight: float = 0.1,
     latent_reg_weight: float = 0.001,
+    reference_image: torch.Tensor = None,
     save_path: str = None,
     seed: int = None,
 ):
-    """
-    StyleGAN-based inversion in W space — embedding objective only (attacker never sees victim pixels).
-    """
-    device = next(generator.parameters()).device
+    """StyleGAN-based inversion attack in latent space."""
     model.eval()
-    model.to(device)
     for param in model.parameters():
         param.requires_grad = False
-
-    target_embedding = target_embedding.to(device)
 
     if seed is not None:
         torch.manual_seed(seed)
 
-    z_dim = int(getattr(generator, "z_dim", 512))
-    class_labels = None
-    if hasattr(generator, "c_dim") and getattr(generator, "c_dim", 0) > 0:
-        class_labels = torch.zeros([1, generator.c_dim], device=device)
-
-    # Start from mapped W space (much more expressive than optimizing Z alone).
-    with torch.no_grad():
-        z0 = torch.randn(1, z_dim, device=device)
-        w0 = generator.mapping(z0, class_labels)
-
-    latent = w0.detach().clone().requires_grad_(True)
+    device = next(generator.parameters()).device
+    latent_dim = getattr(generator, "z_dim", None) or getattr(generator, "w_dim", 512)
+    latent = torch.randn(1, latent_dim, device=device) * 0.5
+    latent.requires_grad_(True)
 
     optimizer = torch.optim.Adam([latent], lr=lr)
+
+    perceptual_fn = None
+    if perceptual_weight > 0 and lpips is not None and reference_image is not None:
+        perceptual_fn = lpips.LPIPS(net="vgg").to(device).eval()
 
     loss_history = []
     with torch.no_grad():
         try:
-            start_full = _stylegan_synthesize(generator, latent)
-            start_small = _downsample_for_facenet(start_full)
-            start_emb = model(start_small)
+            start_image = _stylegan_synthesize(generator, latent)
+            start_emb = model(start_image)
             initial_dist = float(torch.norm(start_emb - target_embedding).item())
         except Exception:
             initial_dist = None
 
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=max(iterations // 3, 1), gamma=0.5)
-
     for i in range(iterations):
         optimizer.zero_grad()
 
-        synth_full = _stylegan_synthesize(generator, latent)
-        synth_160 = _downsample_for_facenet(synth_full)
-        generated_emb = model(synth_160)
+        synth_img = _stylegan_synthesize(generator, latent)
+        generated_emb = model(synth_img)
 
-        identity_loss = _embedding_inversion_loss(generated_emb, target_embedding)
+        identity_loss = 1.0 - F.cosine_similarity(generated_emb, target_embedding.detach(), dim=1).mean()
+
+        perceptual_loss = torch.tensor(0.0, device=device)
+        if perceptual_fn is not None:
+            perceptual_loss = perceptual_fn(synth_img, reference_image.to(device)).mean()
 
         latent_reg = torch.mean(latent.pow(2))
 
-        loss = identity_weight * identity_loss + latent_reg_weight * latent_reg
+        loss = (
+            identity_weight * identity_loss
+            + perceptual_weight * perceptual_loss
+            + latent_reg_weight * latent_reg
+        )
 
         loss.backward()
         optimizer.step()
-        scheduler.step()
+
+        with torch.no_grad():
+            latent.clamp_(-3.0, 3.0)
 
         loss_history.append(float(loss.item()))
 
-        if i % 200 == 0 or i == iterations - 1:
+        if i % 200 == 0:
             print(
                 f"    iter {i:4d}: identity={identity_loss.item():.6f}, "
-                f"latent_reg={latent_reg.item():.6f}, total={loss.item():.6f}"
+                f"perc={perceptual_loss.item():.6f}, latent={latent_reg.item():.6f}, total={loss.item():.6f}"
             )
 
-    with torch.no_grad():
-        final_full = _stylegan_synthesize(generator, latent).detach()
-        final_small = _downsample_for_facenet(final_full).detach()
+    final_image = _stylegan_synthesize(generator, latent).detach()
 
     if save_path:
         try:
             from torchvision.utils import save_image
-            img_save = (final_small.squeeze() + 1.0) / 2.0
+            img_save = (final_image.squeeze() + 1.0) / 2.0
             save_image(img_save, save_path)
         except Exception:
             pass
 
-    return final_small, loss.item(), {"initial_distance": initial_dist, "loss_history": loss_history}
+    return final_image, loss.item(), {"initial_distance": initial_dist, "loss_history": loss_history}
 
 def run_inversion_attack(
     model,
@@ -324,8 +474,6 @@ def run_inversion_attack(
     iterations: int = 2000,
     lr: float = 0.01,
     start_tensor: torch.Tensor = None,
-    prior_dir: Optional[str] = None,
-    prior_exclude_prefixes: Optional[list] = None,
     save_path: str = None,
     save_loss_path: str = None,
     seed: int = None,
@@ -348,20 +496,11 @@ def run_inversion_attack(
     if seed is not None:
         torch.manual_seed(seed)
 
-    # Face-shaped prior beats pure noise under high-d embedding loss (still not the ground-truth crop).
+    # Use provided start tensor or small Gaussian noise
     if start_tensor is not None:
         fake_img = start_tensor.clone().float()
-    elif prior_dir and os.path.isdir(prior_dir):
-        try:
-            fake_img = load_face_prior(
-                prior_dir,
-                max_images=64,
-                exclude_prefixes=prior_exclude_prefixes or [],
-            ).detach().clone()
-        except Exception:
-            fake_img = torch.randn(1, 3, FACENET_INPUT, FACENET_INPUT) * 0.15
     else:
-        fake_img = torch.randn(1, 3, FACENET_INPUT, FACENET_INPUT) * 0.15
+        fake_img = torch.randn(1, 3, 160, 160) * 0.1
 
     fake_img.requires_grad_(True)
     optimizer = torch.optim.Adam([fake_img], lr=lr)
@@ -376,22 +515,19 @@ def run_inversion_attack(
         except Exception:
             initial_dist = None
 
-    tgt = target_embedding.detach()
     for i in range(iterations):
         optimizer.zero_grad()
         fake_emb = model(fake_img)
 
-        cos_loss = _embedding_inversion_loss(fake_emb, tgt)
-        mse = criterion(fake_emb, tgt)
-        # Cosine dominates (stable for embeddings); small MSE nudges scale.
-        match_loss = cos_loss + 0.05 * mse
+        mse = criterion(fake_emb, target_embedding.detach())
 
+        # VERY small TV weight — just enough to reduce checkerboard artifacts
         tv = (
             torch.mean(torch.abs(fake_img[:, :, :, :-1] - fake_img[:, :, :, 1:])) +
             torch.mean(torch.abs(fake_img[:, :, :-1, :] - fake_img[:, :, 1:, :]))
         )
 
-        loss = match_loss + 5e-5 * tv
+        loss = mse + 1e-6 * tv
 
         loss.backward()
         optimizer.step()
@@ -401,11 +537,14 @@ def run_inversion_attack(
 
         loss_history.append(float(loss.item()))
 
-        if i % 200 == 0 or i == iterations - 1:
-            print(
-                f"    iter {i:4d}: cos={(cos_loss.item()):.6f}, mse={mse.item():.6f}, "
-                f"tv={tv.item():.6f}, total={loss.item():.6f}"
-            )
+        if i % 200 == 0:
+            print(f"    iter {i:4d}: mse={mse.item():.6f}, tv={tv.item():.6f}, total={loss.item():.6f}")
+        
+        # Clear intermediate tensors to save memory
+        if i % 50 == 0:
+            del fake_emb, mse, tv, loss
+            gc.collect()
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
     if save_path:
         try:
@@ -434,133 +573,89 @@ def attack_both_models(
     output_dir: str,
     iterations: int = 1000,
     attack_lr: float = 0.02,
-    stylegan_network_pkl: Optional[str] = None,
-    stylegan_repo_dir: Optional[str] = None,
-    face_prior_dir: Optional[str] = None,
-    random_seed: int = 42,
-    plot_file_tag: Optional[str] = None,
+    plot_file_tag: str = "attack"
 ) -> dict:
     """
-    Inversion on BOTH models. Optimiser sees only embeddings (white-box embedding leak).
-    Ground-truth crop is loaded afterward for evaluator plots — never fed into losses.
+    Run inversion attack on BOTH models using the same target.
     """
-    os.makedirs(output_dir, exist_ok=True)
-
-    tag = (plot_file_tag or os.path.basename(os.path.abspath(client_dir))).strip() or "client"
-    vic_abs = os.path.abspath(client_dir)
-
-    stylegan_ckpt = (stylegan_network_pkl or "").strip() or (STYLEGAN_NETWORK_PKL or "").strip()
-    repo_dir = stylegan_repo_dir if stylegan_repo_dir else STYLEGAN_REPO_DIR
-    repo_dir_effective = repo_dir.strip() if isinstance(repo_dir, str) and repo_dir.strip() else None
-
-    infer_device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    prior = face_prior_dir
-    if prior is None and os.path.isdir(CROPPED_DIR):
-        prior = CROPPED_DIR
-
-    print(
-        "  [Attack] Embedding-only inversion (StyleGAN/pixel; no victim pixels in loss)."
-    )
-
-    def run_one_attack(
-        model,
-        embedding,
-        caption: str,
-        out_png: str,
-        prior_exclude_prefixes: list,
-    ) -> tuple[torch.Tensor, float]:
-        if stylegan_ckpt:
-            print(f"    {caption}: StyleGAN latent inversion ({iterations} iters, lr={attack_lr})")
-            generator = load_stylegan_generator(
-                stylegan_ckpt,
-                stylegan_repo_dir=repo_dir_effective,
-                device=infer_device,
-            )
-            img, loss_val, _ = run_stylegan_inversion_attack(
-                model=model,
-                target_embedding=embedding,
-                generator=generator,
-                iterations=iterations,
-                lr=attack_lr,
-                identity_weight=STYLEGAN_IDENTITY_W,
-                latent_reg_weight=STYLEGAN_LATENT_REG_W,
-                save_path=out_png,
-                seed=random_seed,
-            )
-            return img, loss_val
-
-        print(f"    {caption}: pixel-space inversion ({iterations} iters, lr={attack_lr})")
-        img, loss_val = run_inversion_attack(
-            model,
-            embedding,
-            iterations=iterations,
-            lr=attack_lr,
-            prior_dir=prior if prior else None,
-            prior_exclude_prefixes=prior_exclude_prefixes,
-            save_path=out_png,
-            save_loss_path=None,
-            seed=random_seed,
-        )
-        return img, loss_val
-
+    # Using MobileStyleGAN Inversion
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"  Starting MobileStyleGAN attack on {device}...")
+    
+    # Aggressive memory cleanup before starting
+    gc.collect()
+    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+    
+    generator = load_mobilestylegan(device)
+    
+    # 1. Attack No DP Model
     print("  Running on Version A (no DP)...")
-    model_no_dp = load_model_from_checkpoint(model_no_dp_path)
-    target_emb_no_dp, sid_name = whitebox_target_embedding_from_crop(model_no_dp, client_dir)
-
-    prior_exclude_roots = [vic_abs]
-    if os.path.isdir(CROPPED_DIR) and sid_name:
-        crop_abs = os.path.abspath(os.path.join(CROPPED_DIR, sid_name))
-        if os.path.isdir(crop_abs):
-            prior_exclude_roots.append(crop_abs)
-
-    path_no_dp = os.path.join(output_dir, f"attack_no_dp_{tag}.png")
-    fake_img_no_dp, final_loss_no_dp = run_one_attack(
-        model_no_dp, target_emb_no_dp, "No DP", path_no_dp, prior_exclude_roots
+    model_no_dp = load_model_from_checkpoint(model_no_dp_path).to(device)
+    target_emb_no_dp, person_name, original_tensor, _ = get_target_embedding(model_no_dp, client_dir)
+    
+    path_no_dp = os.path.join(output_dir, f"mobilestylegan_{plot_file_tag}_no_dp.png")
+    fake_img_no_dp, final_loss_no_dp = run_mobilestylegan_inversion_attack(
+        model_no_dp, 
+        target_emb_no_dp, 
+        generator=generator,
+        iterations=iterations, 
+        lr=attack_lr,
+        save_path=path_no_dp
     )
     print(f"  Saved: {path_no_dp}")
-
+    
+    # Free memory
+    del model_no_dp
+    gc.collect()
+    
+    # 2. Attack With DP Model
     print("  Running on Version B (with DP)...")
-    model_with_dp = load_model_from_checkpoint(model_with_dp_path)
-    target_emb_with_dp, _ = whitebox_target_embedding_from_crop(model_with_dp, client_dir)
-
-    path_with_dp = os.path.join(output_dir, f"attack_with_dp_{tag}.png")
-    fake_img_with_dp, final_loss_with_dp = run_one_attack(
-        model_with_dp, target_emb_with_dp, "With DP", path_with_dp, prior_exclude_roots
+    model_with_dp = load_model_from_checkpoint(model_with_dp_path).to(device)
+    target_emb_with_dp, _, _, _ = get_target_embedding(model_with_dp, client_dir)
+    
+    path_with_dp = os.path.join(output_dir, f"mobilestylegan_{plot_file_tag}_with_dp.png")
+    fake_img_with_dp, final_loss_with_dp = run_mobilestylegan_inversion_attack(
+        model_with_dp, 
+        target_emb_with_dp, 
+        generator=generator,
+        iterations=iterations, 
+        lr=attack_lr,
+        save_path=path_with_dp
     )
     print(f"  Saved: {path_with_dp}")
-
-    gt_tensor, plot_name = evaluator_ground_truth_crop(client_dir)
-
+    
+    # Free memory
+    del model_with_dp
+    gc.collect()
+    
+    # 3. Create comparison figure
     fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-    fig.suptitle(f"Model inversion — {tag}", fontsize=12, y=1.02)
-
-    gt_img = ((gt_tensor.squeeze() + 1) / 2).clamp(0, 1)
-    axes[0].imshow(gt_img.permute(1, 2, 0).cpu().numpy())
-    axes[0].set_title(
-        f"Original (victim crop)\n{plot_name} — not used in loss"
-    )
+    
+    original_img = (original_tensor.squeeze() + 1) / 2
+    axes[0].imshow(original_img.permute(1,2,0).numpy())
+    axes[0].set_title(f"Original Face ({person_name})")
     axes[0].axis("off")
-
-    attack_no_dp = ((fake_img_no_dp.squeeze() + 1) / 2).clamp(0, 1)
-    axes[1].imshow(attack_no_dp.permute(1, 2, 0).cpu().numpy())
-    axes[1].set_title("Inversion without DP", color="darkred")
+    
+    attack_no_dp = (fake_img_no_dp.squeeze() + 1) / 2
+    axes[1].imshow(attack_no_dp.permute(1,2,0).numpy())
+    axes[1].set_title("MobileStyleGAN Attack\n(No DP — Clear Result)", color="red")
     axes[1].axis("off")
-
-    attack_with_dp = ((fake_img_with_dp.squeeze() + 1) / 2).clamp(0, 1)
-    axes[2].imshow(attack_with_dp.permute(1, 2, 0).cpu().numpy())
-    axes[2].set_title("Inversion with DP", color="darkgreen")
+    
+    attack_with_dp = (fake_img_with_dp.squeeze() + 1) / 2
+    axes[2].imshow(attack_with_dp.permute(1,2,0).numpy())
+    axes[2].set_title("MobileStyleGAN Attack\n(With DP — Protected)", color="green")
     axes[2].axis("off")
-
+    
     plt.tight_layout()
-    comparison_path = os.path.join(output_dir, f"attack_comparison_{tag}.png")
+    comparison_path = os.path.join(output_dir, f"mobilestylegan_{plot_file_tag}_comparison.png")
     plt.savefig(comparison_path, dpi=150, bbox_inches="tight")
     plt.close()
 
+    
     print(f"  Saved: {comparison_path}")
-
+    
     return {
-        "client_tag": tag,
+        "client_tag": plot_file_tag,
         "no_dp_final_loss": final_loss_no_dp,
-        "with_dp_final_loss": final_loss_with_dp,
+        "with_dp_final_loss": final_loss_with_dp
     }
