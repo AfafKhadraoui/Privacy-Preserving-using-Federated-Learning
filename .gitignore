@@ -21,3 +21,7 @@ data/
 /results/metrics/
 /results/plots/
 frontend/node_modules/
+cns_project_cache/
+vendor/
+error.txt
+run_attack_debug.log

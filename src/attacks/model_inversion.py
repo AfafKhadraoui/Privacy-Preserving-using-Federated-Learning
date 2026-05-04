@@ -5,12 +5,195 @@ import tempfile
 import urllib.request
 import gc
 from typing import Optional
+
+# Path and Cache Configuration
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Force PyTorch Hub to download models to the F: drive instead of C: drive
+os.environ["TORCH_HOME"] = os.path.join(_REPO_ROOT, "cns_project_cache", "torch_home")
+os.makedirs(os.environ["TORCH_HOME"], exist_ok=True)
+
+
 import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
 from PIL import Image
-import torchvision.transforms as T
+
+# -----------------------------
+# MobileStyleGAN CPU Inversion (Lite)
+# -----------------------------
+class MobileStyleGANLite(nn.Module):
+    """Memory-efficient wrapper for MobileStyleGAN generator."""
+    def __init__(self, mapping_net, student, style_mean):
+        super().__init__()
+        self.mapping_net = mapping_net
+        self.student = student
+        self.register_buffer("style_mean", style_mean)
+        
+    def forward(self, var=None, style=None, truncated=False, generator="student"):
+        # Support direct style (W+) injection or MappingNet (Z) input
+        if style is None:
+            style = self.mapping_net(var)
+            if truncated:
+                # Simple truncation as implemented in Distiller
+                style = self.style_mean + 0.5 * (style - self.style_mean)
+        
+        return self.student(style)["img"]
+
+def load_mobilestylegan(device):
+    """Memory-optimized loader for MobileStyleGAN.
+    Saves RAM by skipping Teacher, VGG16, and Inception models.
+    """
+    mob_dir = os.path.join(_REPO_ROOT, "cns_project_cache", "MobileStyleGAN")
+    if mob_dir not in sys.path:
+        sys.path.insert(0, mob_dir)
+        
+    from core.utils import load_cfg, select_weights, load_weights
+    from core.model_zoo import model_zoo
+    from core.models.mapping_network import MappingNetwork
+    from core.models.mobile_synthesis_network import MobileSynthesisNetwork
+
+    print("    Loading MobileStyleGAN Lite (RAM Optimized)...")
+    cfg_path = os.path.join(mob_dir, "configs", "mobile_stylegan_ffhq.json")
+    cfg = load_cfg(cfg_path)
+    
+    # 1. Load the checkpoint once
+    print("    Loading weights from disk...")
+    zoo_path = os.path.join(mob_dir, "configs", "model_zoo.json")
+    ckpt = model_zoo("mobilestylegan_ffhq.ckpt", zoo_path=zoo_path)
+    state_dict = ckpt["state_dict"]
+    
+    # 2. Initialize minimal networks
+    # MappingNetwork params: style_dim=512, n_layers=8 (standard for FFHQ)
+    print("    Initializing Mapping Network...")
+    mapping_net = MappingNetwork(style_dim=512, n_layers=8).to(device)
+    mapping_weights = select_weights(state_dict, prefix="mapping_net.")
+    load_weights(mapping_net, mapping_weights)
+    
+    # Student SynthesisNetwork
+    print("    Initializing Student Synthesis Network...")
+    student = MobileSynthesisNetwork(style_dim=512).to(device)
+    student_weights = select_weights(state_dict, prefix="student.")
+    load_weights(student, student_weights)
+    
+    style_mean = state_dict["style_mean"].to(device)
+    
+    # 3. CRITICAL: Clear large checkpoint objects from RAM immediately
+    del ckpt
+    del state_dict
+    gc.collect()
+    
+    # 4. Wrap it
+    generator = MobileStyleGANLite(mapping_net, student, style_mean).to(device)
+    generator.eval()
+    for param in generator.parameters():
+        param.requires_grad = False
+        
+    return generator
+
+def total_variation_loss(img):
+    """Calculates Total Variation loss to encourage smoothness."""
+    tv_h = torch.pow(img[:, :, 1:, :] - img[:, :, :-1, :], 2).sum()
+    tv_w = torch.pow(img[:, :, :, 1:] - img[:, :, :, :-1], 2).sum()
+    return (tv_h + tv_w)
+
+def symmetry_loss(img):
+    """Encourages the face to be front-facing by rewarding horizontal symmetry."""
+    flipped_img = torch.flip(img, [3])
+    return F.mse_loss(img, flipped_img)
+
+def run_mobilestylegan_inversion_attack(
+    model,
+    target_embedding: torch.Tensor,
+    generator,
+    iterations: int = 1000,
+    lr: float = 0.005,
+    save_path: str = None
+):
+    """MobileStyleGAN latent inversion optimized for CPU."""
+    device = next(model.parameters()).device
+    
+    # High-Fidelity W+ Optimization
+    # 1. Start from the 'Average Face'
+    # We use W+ [1, 23, 512] for fine-grained detail (eyes, pose, features)
+    w_avg = generator.style_mean.detach().clone() # [1, 512]
+    w_plus = w_avg.unsqueeze(1).repeat(1, 23, 1).detach().clone().requires_grad_(True)
+    
+    optimizer = torch.optim.Adam([w_plus], lr=lr)
+    
+    print(f"    Running High-Fidelity MobileStyleGAN attack on {device}...")
+    for i in range(iterations):
+        optimizer.zero_grad()
+        
+        # Generate image from current latent
+        img_s = generator(style=w_plus)
+        
+        # Noise Augmentation: Prevents optimization from getting stuck in 
+        # local minima and encourages sharper, more robust facial features.
+        if i < iterations * 0.8:
+            # Add 1% noise during the search phase
+            noise = torch.randn_like(img_s) * 0.01
+            img_proc = img_s + noise
+        else:
+            # Clean image for the final refinement phase
+            img_proc = img_s
+
+        # Resize to FaceNet input size (160x160)
+        synth_img = F.interpolate(img_proc, size=(160, 160), mode='bilinear', align_corners=False)
+        
+        generated_emb = model(synth_img)
+        
+        # Multi-part Loss function
+        # 1. Identity loss (Primary goal)
+        identity_loss = 1.0 - F.cosine_similarity(generated_emb, target_embedding.detach(), dim=1).mean()
+        
+        # 2. W+ Regularization (Stay close to 'Human' manifold)
+        w_reg = torch.mean((w_plus - w_avg.unsqueeze(1)).pow(2))
+        
+        # 3. TV Loss (Prevent noise/blurriness)
+        tv = total_variation_loss(img_s)
+        
+        # 4. Symmetry Loss (Force front-facing pose)
+        sym = symmetry_loss(img_s)
+        
+        # Combine losses with weights tuned for CPU/8GB stability
+        # Maximizing sharpness: High identity weight, low regularization, low TV
+        loss = 20.0 * identity_loss + 0.5 * w_reg + 0.00005 * tv + 0.05 * sym
+        
+        loss.backward()
+        optimizer.step()
+        
+        if i % 100 == 0:
+            print(f"      iter {i:4d}: identity={identity_loss.item():.4f}, sym={sym.item():.4f}, w_reg={w_reg.item():.4f}")
+            gc.collect()
+
+    final_image_batch = generator(style=w_plus.detach()).detach()
+    # Resize for saving so it matches the expected 160x160 output
+    final_image = F.interpolate(final_image_batch, size=(160, 160), mode='bilinear', align_corners=False)
+    
+    if save_path:
+        from torchvision.utils import save_image
+        img_save = (final_image.squeeze() + 1.0) / 2.0
+        save_image(img_save, save_path)
+        
+    return final_image, loss.item()
+
+FACENET_INPUT = 160
+
+
+def _pil_to_tensor(image: Image.Image) -> torch.Tensor:
+    resized = image.resize((FACENET_INPUT, FACENET_INPUT), Image.BILINEAR)
+    array = torch.from_numpy(__import__("numpy").array(resized, dtype="float32")).permute(2, 0, 1)
+    return (array / 127.5 - 1.0).unsqueeze(0)
+
+
+def _ensure_image_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.ndim == 3:
+        tensor = tensor.unsqueeze(0)
+    if tensor.shape[-2:] != (FACENET_INPUT, FACENET_INPUT):
+        tensor = F.interpolate(tensor, size=(FACENET_INPUT, FACENET_INPUT), mode="bilinear", align_corners=False)
+    return tensor.float().clamp(-1.0, 1.0)
 
 try:
     import lpips
@@ -64,17 +247,10 @@ def get_target_embedding(model, client_dir: str) -> tuple[torch.Tensor, str]:
         lower = file_path.lower()
         if lower.endswith(".pt"):
             tensor = torch.load(file_path, map_location="cpu")
-            if tensor.ndim == 3:
-                tensor = tensor.unsqueeze(0)
-            return tensor.float()
+            return _ensure_image_tensor(tensor)
 
         image = Image.open(file_path).convert("RGB")
-        image_transform = T.Compose([
-            T.Resize((160, 160)),
-            T.ToTensor(),
-            T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-        ])
-        return image_transform(image).unsqueeze(0)
+        return _pil_to_tensor(image)
 
     # Search only one level: find first person directory, then first face file inside it.
     person_dirs = [d for d in os.listdir(client_dir) if os.path.isdir(os.path.join(client_dir, d))]
@@ -120,24 +296,14 @@ def load_face_prior(prior_dir: str, max_images: int = 32) -> torch.Tensor:
     selected_paths = candidate_paths[:max_images]
 
     image_tensors = []
-    image_transform = T.Compose([
-        T.Resize((160, 160)),
-        T.ToTensor(),
-        T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-    ])
 
     for file_path in selected_paths:
         if file_path.lower().endswith(".pt"):
             tensor = torch.load(file_path, map_location="cpu").float()
-            if tensor.ndim == 3:
-                tensor = tensor.unsqueeze(0)
-            if tensor.shape[-2:] != (160, 160):
-                tensor = F.interpolate(tensor, size=(160, 160), mode="bilinear", align_corners=False)
-            image_tensors.append(tensor.clamp(-1.0, 1.0))
+            image_tensors.append(_ensure_image_tensor(tensor))
         else:
             image = Image.open(file_path).convert("RGB")
-            tensor = image_transform(image).unsqueeze(0)
-            image_tensors.append(tensor)
+            image_tensors.append(_pil_to_tensor(image))
 
     prior = torch.mean(torch.cat(image_tensors, dim=0), dim=0, keepdim=True)
     return prior.clamp(-1.0, 1.0)
@@ -151,6 +317,10 @@ def load_stylegan_generator(network_pkl: str, stylegan_repo_dir: Optional[str] =
 
     if repo_dir and repo_dir not in sys.path:
         sys.path.insert(0, repo_dir)
+
+    # Force StyleGAN to use the F: drive cache for weights and compiled code
+    os.environ["DNNLIB_CACHE_DIR"] = os.path.join(_REPO_ROOT, "cns_project_cache")
+    os.environ["TORCH_EXTENSIONS_DIR"] = os.path.join(_REPO_ROOT, "cns_project_cache", "torch_extensions")
 
     try:
         import dnnlib
@@ -172,7 +342,7 @@ def load_stylegan_generator(network_pkl: str, stylegan_repo_dir: Optional[str] =
 
 def _ensure_stylegan_repo() -> str:
     """Download and cache StyleGAN2-ADA locally if it is not already available."""
-    cache_root = os.path.join(tempfile.gettempdir(), "stylegan2-ada-pytorch-cache")
+    cache_root = os.path.join(_REPO_ROOT, "cns_project_cache")
     repo_root = os.path.join(cache_root, "stylegan2-ada-pytorch-main")
     if os.path.exists(os.path.join(repo_root, "dnnlib")):
         return repo_root
@@ -401,45 +571,66 @@ def attack_both_models(
     model_with_dp_path: str,
     client_dir: str,
     output_dir: str,
-    iterations: int = 1000
+    iterations: int = 1000,
+    attack_lr: float = 0.02,
+    plot_file_tag: str = "attack"
 ) -> dict:
     """
     Run inversion attack on BOTH models using the same target.
     """
-    os.makedirs(output_dir, exist_ok=True)
+    # Using MobileStyleGAN Inversion
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"  Starting MobileStyleGAN attack on {device}...")
+    
+    # Aggressive memory cleanup before starting
+    gc.collect()
+    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+    
+    generator = load_mobilestylegan(device)
     
     # 1. Attack No DP Model
     print("  Running on Version A (no DP)...")
-    model_no_dp = load_model_from_checkpoint(model_no_dp_path)
+    model_no_dp = load_model_from_checkpoint(model_no_dp_path).to(device)
     target_emb_no_dp, person_name, original_tensor, _ = get_target_embedding(model_no_dp, client_dir)
     
-    path_no_dp = os.path.join(output_dir, "attack_no_dp.png")
-    fake_img_no_dp, final_loss_no_dp = run_inversion_attack(
+    path_no_dp = os.path.join(output_dir, f"mobilestylegan_{plot_file_tag}_no_dp.png")
+    fake_img_no_dp, final_loss_no_dp = run_mobilestylegan_inversion_attack(
         model_no_dp, 
         target_emb_no_dp, 
+        generator=generator,
         iterations=iterations, 
+        lr=attack_lr,
         save_path=path_no_dp
     )
     print(f"  Saved: {path_no_dp}")
     
+    # Free memory
+    del model_no_dp
+    gc.collect()
+    
     # 2. Attack With DP Model
     print("  Running on Version B (with DP)...")
-    model_with_dp = load_model_from_checkpoint(model_with_dp_path)
+    model_with_dp = load_model_from_checkpoint(model_with_dp_path).to(device)
     target_emb_with_dp, _, _, _ = get_target_embedding(model_with_dp, client_dir)
     
-    path_with_dp = os.path.join(output_dir, "attack_with_dp.png")
-    fake_img_with_dp, final_loss_with_dp = run_inversion_attack(
+    path_with_dp = os.path.join(output_dir, f"mobilestylegan_{plot_file_tag}_with_dp.png")
+    fake_img_with_dp, final_loss_with_dp = run_mobilestylegan_inversion_attack(
         model_with_dp, 
         target_emb_with_dp, 
+        generator=generator,
         iterations=iterations, 
+        lr=attack_lr,
         save_path=path_with_dp
     )
     print(f"  Saved: {path_with_dp}")
     
+    # Free memory
+    del model_with_dp
+    gc.collect()
+    
     # 3. Create comparison figure
     fig, axes = plt.subplots(1, 3, figsize=(12, 4))
     
-    # original_tensor is [1, 3, 160, 160] with values in [-1, 1]
     original_img = (original_tensor.squeeze() + 1) / 2
     axes[0].imshow(original_img.permute(1,2,0).numpy())
     axes[0].set_title(f"Original Face ({person_name})")
@@ -447,22 +638,24 @@ def attack_both_models(
     
     attack_no_dp = (fake_img_no_dp.squeeze() + 1) / 2
     axes[1].imshow(attack_no_dp.permute(1,2,0).numpy())
-    axes[1].set_title("Attack Result\n(No DP — Face Visible)", color="red")
+    axes[1].set_title("MobileStyleGAN Attack\n(No DP — Clear Result)", color="red")
     axes[1].axis("off")
     
     attack_with_dp = (fake_img_with_dp.squeeze() + 1) / 2
     axes[2].imshow(attack_with_dp.permute(1,2,0).numpy())
-    axes[2].set_title("Attack Result\n(With DP — Protected)", color="green")
+    axes[2].set_title("MobileStyleGAN Attack\n(With DP — Protected)", color="green")
     axes[2].axis("off")
     
     plt.tight_layout()
-    comparison_path = os.path.join(output_dir, "attack_comparison.png")
+    comparison_path = os.path.join(output_dir, f"mobilestylegan_{plot_file_tag}_comparison.png")
     plt.savefig(comparison_path, dpi=150, bbox_inches="tight")
     plt.close()
+
     
     print(f"  Saved: {comparison_path}")
     
     return {
+        "client_tag": plot_file_tag,
         "no_dp_final_loss": final_loss_no_dp,
         "with_dp_final_loss": final_loss_with_dp
     }
