@@ -4,6 +4,7 @@ import zipfile
 import tempfile
 import urllib.request
 import gc
+import gdown
 from typing import Optional
 
 # Path and Cache Configuration
@@ -45,23 +46,41 @@ def load_mobilestylegan(device):
     """Memory-optimized loader for MobileStyleGAN.
     Saves RAM by skipping Teacher, VGG16, and Inception models.
     """
-    mob_dir = os.path.join(_REPO_ROOT, "cns_project_cache", "MobileStyleGAN")
+    mob_dir = _ensure_mobilestylegan_repo()
+    if not mob_dir:
+        return None
+
     if mob_dir not in sys.path:
         sys.path.insert(0, mob_dir)
         
-    from core.utils import load_cfg, select_weights, load_weights
-    from core.model_zoo import model_zoo
-    from core.models.mapping_network import MappingNetwork
-    from core.models.mobile_synthesis_network import MobileSynthesisNetwork
+    try:
+        from core.utils import load_cfg, select_weights, load_weights
+        from core.model_zoo import model_zoo
+        from core.models.mapping_network import MappingNetwork
+        from core.models.mobile_synthesis_network import MobileSynthesisNetwork
+    except ImportError as e:
+        print(f"    [WARNING] Failed to import MobileStyleGAN components: {e}")
+        return None
 
     print("    Loading MobileStyleGAN Lite (RAM Optimized)...")
     cfg_path = os.path.join(mob_dir, "configs", "mobile_stylegan_ffhq.json")
+    if not os.path.exists(cfg_path):
+        print(f"    [WARNING] Config file not found: {cfg_path}")
+        return None
+    
     cfg = load_cfg(cfg_path)
     
     # 1. Load the checkpoint once
     print("    Loading weights from disk...")
-    zoo_path = os.path.join(mob_dir, "configs", "model_zoo.json")
-    ckpt = model_zoo("mobilestylegan_ffhq.ckpt", zoo_path=zoo_path)
+    ckpt_path = os.path.join(mob_dir, "mobilestylegan_ffhq.ckpt")
+    
+    if os.path.exists(ckpt_path):
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+    else:
+        print(f"    [INFO] Downloading pretrained weights to {ckpt_path}...")
+        gdown.download(id="11Kja0XGE8liLb6R5slNZjF3j3v_6xydt", output=ckpt_path, quiet=False)
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+    
     state_dict = ckpt["state_dict"]
     
     # 2. Initialize minimal networks
@@ -309,6 +328,55 @@ def load_face_prior(prior_dir: str, max_images: int = 32) -> torch.Tensor:
     return prior.clamp(-1.0, 1.0)
 
 
+def get_general_face_prior(clients_root: str, exclude_client: str = None, max_images: int = 16) -> torch.Tensor:
+    """
+    Build a fair 'General Ghost' prior by averaging faces from ALL OTHER clients.
+    This simulates an attacker who knows what humans look like generally, but has 
+    zero knowledge of the specific target.
+    """
+    all_face_paths = []
+    
+    # Walk through all clients
+    for client_name in os.listdir(clients_root):
+        if exclude_client and client_name == exclude_client:
+            continue
+            
+        client_path = os.path.join(clients_root, client_name)
+        if not os.path.isdir(client_path):
+            continue
+            
+        for root, _, files in os.walk(client_path):
+            for file_name in files:
+                if file_name.lower().endswith((".pt", ".jpg", ".jpeg", ".png")):
+                    all_face_paths.append(os.path.join(root, file_name))
+    
+    if not all_face_paths:
+        # Fallback to random noise if no other data exists
+        return torch.randn(1, 3, 160, 160) * 0.1
+        
+    # Pick a diverse set of images
+    import random
+    random.shuffle(all_face_paths)
+    selected_paths = all_face_paths[:max_images]
+    
+    image_tensors = []
+    for path in selected_paths:
+        try:
+            if path.lower().endswith(".pt"):
+                tensor = torch.load(path, map_location="cpu").float()
+                image_tensors.append(_ensure_image_tensor(tensor))
+            else:
+                image = Image.open(path).convert("RGB")
+                image_tensors.append(_pil_to_tensor(image))
+        except Exception:
+            continue
+            
+    if not image_tensors:
+        return torch.randn(1, 3, 160, 160) * 0.1
+        
+    return torch.mean(torch.cat(image_tensors, dim=0), dim=0, keepdim=True).clamp(-1.0, 1.0)
+
+
 def load_stylegan_generator(network_pkl: str, stylegan_repo_dir: Optional[str] = None, device: str = "cpu"):
     """Load a pretrained StyleGAN2/StyleGAN3 generator from an official NVLabs pickle."""
     repo_dir = stylegan_repo_dir
@@ -338,6 +406,43 @@ def load_stylegan_generator(network_pkl: str, stylegan_repo_dir: Optional[str] =
     for param in generator.parameters():
         param.requires_grad = False
     return generator
+
+
+def _ensure_mobilestylegan_repo() -> Optional[str]:
+    """Download and cache MobileStyleGAN repository if not available."""
+    cache_root = os.path.join(_REPO_ROOT, "cns_project_cache")
+    repo_root = os.path.join(cache_root, "MobileStyleGAN")
+    
+    # Check if a specific file exists to verify the repo is complete
+    if os.path.exists(os.path.join(repo_root, "core", "utils.py")):
+        return repo_root
+
+    os.makedirs(cache_root, exist_ok=True)
+    url = "https://github.com/bes-dev/MobileStyleGAN.pytorch/archive/refs/heads/develop.zip"
+    archive_path = os.path.join(cache_root, "MobileStyleGAN.zip")
+
+    print(f"    [INFO] Downloading MobileStyleGAN repository from {url}...")
+    try:
+        import shutil
+        urllib.request.urlretrieve(url, archive_path)
+        with zipfile.ZipFile(archive_path, "r") as zip_ref:
+            zip_ref.extractall(cache_root)
+        
+        # The zip extracts to MobileStyleGAN.pytorch-develop, rename it to MobileStyleGAN
+        extracted_folder = os.path.join(cache_root, "MobileStyleGAN.pytorch-develop")
+        if os.path.exists(extracted_folder):
+            if os.path.exists(repo_root):
+                shutil.rmtree(repo_root)
+            os.rename(extracted_folder, repo_root)
+        
+        if os.path.exists(archive_path):
+            os.remove(archive_path)
+            
+        print("    [INFO] MobileStyleGAN repository setup complete.")
+        return repo_root
+    except Exception as e:
+        print(f"    [ERROR] Failed to download MobileStyleGAN repo: {e}")
+        return None
 
 
 def _ensure_stylegan_repo() -> str:
@@ -566,6 +671,49 @@ def run_inversion_attack(
 
     return fake_img.detach(), loss.item()
 
+def _embedding_from_image(model, image_path: str, device: str):
+    """
+    Get embedding and tensor from a raw image file.
+    Uses MTCNN to detect and align the face (160x160) before embedding.
+    Falls back to simple resize if no face is detected.
+    """
+    lower = image_path.lower()
+    if lower.endswith(".pt"):
+        tensor = torch.load(image_path, map_location="cpu").float()
+        tensor = _ensure_image_tensor(tensor)
+        name = os.path.splitext(os.path.basename(image_path))[0]
+    else:
+        raw_image = Image.open(image_path).convert("RGB")
+        name = os.path.splitext(os.path.basename(image_path))[0]
+
+        # --- MTCNN face detection + alignment ---
+        try:
+            from facenet_pytorch import MTCNN
+            mtcnn = MTCNN(image_size=FACENET_INPUT, margin=20, keep_all=False,
+                          device=device, post_process=False)
+            face_tensor = mtcnn(raw_image)  # returns [3, 160, 160] float or None
+            if face_tensor is not None:
+                # mtcnn returns 0-255 floats; normalise to [-1, 1]
+                face_tensor = (face_tensor / 127.5 - 1.0).unsqueeze(0)
+                tensor = face_tensor.clamp(-1.0, 1.0)
+                print(f"    [MTCNN] Face detected and cropped from {os.path.basename(image_path)}")
+            else:
+                print(f"    [MTCNN] No face detected in {os.path.basename(image_path)}, using full image resize.")
+                tensor = _pil_to_tensor(raw_image)
+        except ImportError:
+            print("    [WARNING] facenet_pytorch not installed; using simple resize.")
+            tensor = _pil_to_tensor(raw_image)
+
+    if tensor.ndim == 3:
+        tensor = tensor.unsqueeze(0)
+
+    model.eval()
+    with torch.no_grad():
+        embedding = model(tensor.to(device))
+
+    return embedding, name, tensor
+
+
 def attack_both_models(
     model_no_dp_path: str,
     model_with_dp_path: str,
@@ -573,89 +721,151 @@ def attack_both_models(
     output_dir: str,
     iterations: int = 1000,
     attack_lr: float = 0.02,
-    plot_file_tag: str = "attack"
+    plot_file_tag: str = "attack",
+    target_image_path: Optional[str] = None,
 ) -> dict:
     """
     Run inversion attack on BOTH models using the same target.
+    Always runs BOTH MobileStyleGAN (latent) and Pixel-Space attacks.
+    Pixel-space always starts from the GAN ghost face (zero-knowledge).
     """
-    # Using MobileStyleGAN Inversion
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"  Starting MobileStyleGAN attack on {device}...")
-    
-    # Aggressive memory cleanup before starting
+    print(f"  Loading MobileStyleGAN on {device}...")
+
     gc.collect()
     torch.cuda.empty_cache() if torch.cuda.is_available() else None
-    
+
     generator = load_mobilestylegan(device)
-    
-    # 1. Attack No DP Model
+
+    # -- Ghost face prior: decode GAN style_mean → pixel image (zero-knowledge) --
+    if generator is not None:
+        with torch.no_grad():
+            w_avg      = generator.style_mean.detach()              # [1, 512]
+            w_avg_plus = w_avg.unsqueeze(1).repeat(1, 23, 1)        # [1, 23, 512]
+            ghost_face = generator(style=w_avg_plus).detach().cpu() # [1, 3, H, W]
+            ghost_face = ghost_face.clamp(-1.0, 1.0)
+    else:
+        ghost_face = torch.zeros(1, 3, 160, 160)  # neutral gray
+
+    # -- 1. Attack No-DP Model --
     print("  Running on Version A (no DP)...")
     model_no_dp = load_model_from_checkpoint(model_no_dp_path).to(device)
-    target_emb_no_dp, person_name, original_tensor, _ = get_target_embedding(model_no_dp, client_dir)
-    
-    path_no_dp = os.path.join(output_dir, f"mobilestylegan_{plot_file_tag}_no_dp.png")
-    fake_img_no_dp, final_loss_no_dp = run_mobilestylegan_inversion_attack(
-        model_no_dp, 
-        target_emb_no_dp, 
-        generator=generator,
-        iterations=iterations, 
-        lr=attack_lr,
-        save_path=path_no_dp
+
+    if target_image_path:
+        target_emb_no_dp, person_name, original_tensor = _embedding_from_image(
+            model_no_dp, target_image_path, device
+        )
+    else:
+        target_emb_no_dp, person_name, original_tensor, _ = get_target_embedding(
+            model_no_dp, client_dir
+        )
+
+    # 1a. MobileStyleGAN attack
+    if generator:
+        path_msg_no_dp = os.path.join(output_dir, f"msg_{plot_file_tag}_no_dp.png")
+        fake_msg_no_dp, loss_msg_no_dp = run_mobilestylegan_inversion_attack(
+            model_no_dp, target_emb_no_dp,
+            generator=generator, iterations=iterations, lr=attack_lr,
+            save_path=path_msg_no_dp
+        )
+        print(f"  Saved: {path_msg_no_dp}")
+    else:
+        fake_msg_no_dp, loss_msg_no_dp = None, None
+
+    # 1b. Pixel-space attack (always, starts from ghost face)
+    path_pix_no_dp = os.path.join(output_dir, f"pixel_{plot_file_tag}_no_dp.png")
+    fake_pix_no_dp, loss_pix_no_dp = run_inversion_attack(
+        model_no_dp, target_emb_no_dp,
+        iterations=iterations, lr=attack_lr,
+        start_tensor=ghost_face.to(device),
+        save_path=path_pix_no_dp
     )
-    print(f"  Saved: {path_no_dp}")
-    
-    # Free memory
+    print(f"  Saved: {path_pix_no_dp}")
+
     del model_no_dp
     gc.collect()
-    
-    # 2. Attack With DP Model
+
+    # -- 2. Attack With-DP Model --
     print("  Running on Version B (with DP)...")
     model_with_dp = load_model_from_checkpoint(model_with_dp_path).to(device)
-    target_emb_with_dp, _, _, _ = get_target_embedding(model_with_dp, client_dir)
-    
-    path_with_dp = os.path.join(output_dir, f"mobilestylegan_{plot_file_tag}_with_dp.png")
-    fake_img_with_dp, final_loss_with_dp = run_mobilestylegan_inversion_attack(
-        model_with_dp, 
-        target_emb_with_dp, 
-        generator=generator,
-        iterations=iterations, 
-        lr=attack_lr,
-        save_path=path_with_dp
+
+    if target_image_path:
+        target_emb_dp, _, _ = _embedding_from_image(
+            model_with_dp, target_image_path, device
+        )
+    else:
+        target_emb_dp, _, _, _ = get_target_embedding(model_with_dp, client_dir)
+
+    # 2a. MobileStyleGAN attack
+    if generator:
+        path_msg_dp = os.path.join(output_dir, f"msg_{plot_file_tag}_with_dp.png")
+        fake_msg_dp, loss_msg_dp = run_mobilestylegan_inversion_attack(
+            model_with_dp, target_emb_dp,
+            generator=generator, iterations=iterations, lr=attack_lr,
+            save_path=path_msg_dp
+        )
+        print(f"  Saved: {path_msg_dp}")
+    else:
+        fake_msg_dp, loss_msg_dp = None, None
+
+    # 2b. Pixel-space attack (always, starts from ghost face)
+    path_pix_dp = os.path.join(output_dir, f"pixel_{plot_file_tag}_with_dp.png")
+    fake_pix_dp, loss_pix_dp = run_inversion_attack(
+        model_with_dp, target_emb_dp,
+        iterations=iterations, lr=attack_lr,
+        start_tensor=ghost_face.to(device),
+        save_path=path_pix_dp
     )
-    print(f"  Saved: {path_with_dp}")
-    
-    # Free memory
+    print(f"  Saved: {path_pix_dp}")
+
     del model_with_dp
     gc.collect()
-    
-    # 3. Create comparison figure
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-    
-    original_img = (original_tensor.squeeze() + 1) / 2
-    axes[0].imshow(original_img.permute(1,2,0).numpy())
-    axes[0].set_title(f"Original Face ({person_name})")
-    axes[0].axis("off")
-    
-    attack_no_dp = (fake_img_no_dp.squeeze() + 1) / 2
-    axes[1].imshow(attack_no_dp.permute(1,2,0).numpy())
-    axes[1].set_title("MobileStyleGAN Attack\n(No DP — Clear Result)", color="red")
-    axes[1].axis("off")
-    
-    attack_with_dp = (fake_img_with_dp.squeeze() + 1) / 2
-    axes[2].imshow(attack_with_dp.permute(1,2,0).numpy())
-    axes[2].set_title("MobileStyleGAN Attack\n(With DP — Protected)", color="green")
-    axes[2].axis("off")
-    
+
+    # -- 3. Build 5-panel comparison figure --
+    n_cols = 5 if generator else 3
+    fig, axes = plt.subplots(1, n_cols, figsize=(4 * n_cols, 4))
+
+    def _show(ax, tensor, title, color="black"):
+        img = (tensor.squeeze().cpu() + 1) / 2
+        img = img.clamp(0, 1).permute(1, 2, 0).numpy()
+        ax.imshow(img)
+        ax.set_title(title, color=color, fontsize=9)
+        ax.axis("off")
+
+    col = 0
+    _show(axes[col], original_tensor, f"Original\n({person_name})")
+    col += 1
+
+    if generator:
+        _show(axes[col], fake_msg_no_dp,
+              "MobileStyleGAN\nNo DP  ⚠️", color="red")
+        col += 1
+        _show(axes[col], fake_pix_no_dp,
+              "Pixel-Space\nNo DP  ⚠️", color="red")
+        col += 1
+        _show(axes[col], fake_msg_dp,
+              "MobileStyleGAN\nWith DP  🔒", color="green")
+        col += 1
+        _show(axes[col], fake_pix_dp,
+              "Pixel-Space\nWith DP  🔒", color="green")
+    else:
+        _show(axes[col], fake_pix_no_dp,
+              "Pixel-Space\nNo DP  ⚠️", color="red")
+        col += 1
+        _show(axes[col], fake_pix_dp,
+              "Pixel-Space\nWith DP  🔒", color="green")
+
+    plt.suptitle("Model Inversion Attack Comparison", fontsize=12, fontweight="bold")
     plt.tight_layout()
-    comparison_path = os.path.join(output_dir, f"mobilestylegan_{plot_file_tag}_comparison.png")
+    comparison_path = os.path.join(output_dir, f"comparison_{plot_file_tag}.png")
     plt.savefig(comparison_path, dpi=150, bbox_inches="tight")
     plt.close()
-
-    
     print(f"  Saved: {comparison_path}")
-    
+
     return {
-        "client_tag": plot_file_tag,
-        "no_dp_final_loss": final_loss_no_dp,
-        "with_dp_final_loss": final_loss_with_dp
+        "client_tag":       plot_file_tag,
+        "msg_no_dp_loss":   loss_msg_no_dp,
+        "pix_no_dp_loss":   loss_pix_no_dp,
+        "msg_dp_loss":      loss_msg_dp,
+        "pix_dp_loss":      loss_pix_dp,
     }
