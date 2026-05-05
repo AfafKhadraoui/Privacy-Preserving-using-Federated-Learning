@@ -66,11 +66,9 @@ print("✅  All attacks complete!")
 print("=" * 60)
 for res in all_results:
     tag = res["client_tag"]
-    print(f"\n  [{tag}]")
-    if res.get("msg_no_dp_loss") is not None:
-        print(f"    MobileStyleGAN  No-DP  loss : {res['msg_no_dp_loss']:.4f}")
-        print(f"    MobileStyleGAN  With-DP loss : {res['msg_dp_loss']:.4f}")
-    print(f"    Pixel-Space     No-DP  loss : {res['pix_no_dp_loss']:.4f}")
-    print(f"    Pixel-Space     With-DP loss : {res['pix_dp_loss']:.4f}")
+    attack_type = res["attack_type"]
+    print(f"\n  [{tag}] - {attack_type}")
+    print(f"    Version A (No DP) loss   : {res['no_dp_final_loss']:.4f}")
+    print(f"    Version B (With DP) loss : {res['with_dp_final_loss']:.4f}")
 
 print(f"\nPlots saved to: {PLOTS_DIR}")

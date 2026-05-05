@@ -760,27 +760,25 @@ def attack_both_models(
             model_no_dp, client_dir
         )
 
-    # 1a. MobileStyleGAN attack
     if generator:
-        path_msg_no_dp = os.path.join(output_dir, f"msg_{plot_file_tag}_no_dp.png")
-        fake_msg_no_dp, loss_msg_no_dp = run_mobilestylegan_inversion_attack(
+        path_no_dp = os.path.join(output_dir, f"msg_{plot_file_tag}_no_dp.png")
+        fake_img_no_dp, loss_no_dp = run_mobilestylegan_inversion_attack(
             model_no_dp, target_emb_no_dp,
             generator=generator, iterations=iterations, lr=attack_lr,
-            save_path=path_msg_no_dp
+            save_path=path_no_dp
         )
-        print(f"  Saved: {path_msg_no_dp}")
+        attack_type = "MobileStyleGAN"
     else:
-        fake_msg_no_dp, loss_msg_no_dp = None, None
-
-    # 1b. Pixel-space attack (always, starts from ghost face)
-    path_pix_no_dp = os.path.join(output_dir, f"pixel_{plot_file_tag}_no_dp.png")
-    fake_pix_no_dp, loss_pix_no_dp = run_inversion_attack(
-        model_no_dp, target_emb_no_dp,
-        iterations=iterations, lr=attack_lr,
-        start_tensor=ghost_face.to(device),
-        save_path=path_pix_no_dp
-    )
-    print(f"  Saved: {path_pix_no_dp}")
+        print("    [FALLBACK] Using Pixel-Space Inversion Attack...")
+        path_no_dp = os.path.join(output_dir, f"pixel_{plot_file_tag}_no_dp.png")
+        fake_img_no_dp, loss_no_dp = run_inversion_attack(
+            model_no_dp, target_emb_no_dp,
+            iterations=iterations, lr=attack_lr,
+            start_tensor=ghost_face.to(device),
+            save_path=path_no_dp
+        )
+        attack_type = "Pixel-Space"
+    print(f"  Saved: {path_no_dp}")
 
     del model_no_dp
     gc.collect()
@@ -796,34 +794,29 @@ def attack_both_models(
     else:
         target_emb_dp, _, _, _ = get_target_embedding(model_with_dp, client_dir)
 
-    # 2a. MobileStyleGAN attack
     if generator:
-        path_msg_dp = os.path.join(output_dir, f"msg_{plot_file_tag}_with_dp.png")
-        fake_msg_dp, loss_msg_dp = run_mobilestylegan_inversion_attack(
+        path_dp = os.path.join(output_dir, f"msg_{plot_file_tag}_with_dp.png")
+        fake_img_dp, loss_dp = run_mobilestylegan_inversion_attack(
             model_with_dp, target_emb_dp,
             generator=generator, iterations=iterations, lr=attack_lr,
-            save_path=path_msg_dp
+            save_path=path_dp
         )
-        print(f"  Saved: {path_msg_dp}")
     else:
-        fake_msg_dp, loss_msg_dp = None, None
-
-    # 2b. Pixel-space attack (always, starts from ghost face)
-    path_pix_dp = os.path.join(output_dir, f"pixel_{plot_file_tag}_with_dp.png")
-    fake_pix_dp, loss_pix_dp = run_inversion_attack(
-        model_with_dp, target_emb_dp,
-        iterations=iterations, lr=attack_lr,
-        start_tensor=ghost_face.to(device),
-        save_path=path_pix_dp
-    )
-    print(f"  Saved: {path_pix_dp}")
+        print("    [FALLBACK] Using Pixel-Space Inversion Attack...")
+        path_dp = os.path.join(output_dir, f"pixel_{plot_file_tag}_with_dp.png")
+        fake_img_dp, loss_dp = run_inversion_attack(
+            model_with_dp, target_emb_dp,
+            iterations=iterations, lr=attack_lr,
+            start_tensor=ghost_face.to(device),
+            save_path=path_dp
+        )
+    print(f"  Saved: {path_dp}")
 
     del model_with_dp
     gc.collect()
 
-    # -- 3. Build 5-panel comparison figure --
-    n_cols = 5 if generator else 3
-    fig, axes = plt.subplots(1, n_cols, figsize=(4 * n_cols, 4))
+    # -- 3. Build 3-panel comparison figure --
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
 
     def _show(ax, tensor, title, color="black"):
         img = (tensor.squeeze().cpu() + 1) / 2
@@ -832,28 +825,9 @@ def attack_both_models(
         ax.set_title(title, color=color, fontsize=9)
         ax.axis("off")
 
-    col = 0
-    _show(axes[col], original_tensor, f"Original\n({person_name})")
-    col += 1
-
-    if generator:
-        _show(axes[col], fake_msg_no_dp,
-              "MobileStyleGAN\nNo DP  ⚠️", color="red")
-        col += 1
-        _show(axes[col], fake_pix_no_dp,
-              "Pixel-Space\nNo DP  ⚠️", color="red")
-        col += 1
-        _show(axes[col], fake_msg_dp,
-              "MobileStyleGAN\nWith DP  🔒", color="green")
-        col += 1
-        _show(axes[col], fake_pix_dp,
-              "Pixel-Space\nWith DP  🔒", color="green")
-    else:
-        _show(axes[col], fake_pix_no_dp,
-              "Pixel-Space\nNo DP  ⚠️", color="red")
-        col += 1
-        _show(axes[col], fake_pix_dp,
-              "Pixel-Space\nWith DP  🔒", color="green")
+    _show(axes[0], original_tensor, f"Original\n({person_name})")
+    _show(axes[1], fake_img_no_dp, f"{attack_type}\nNo DP  ⚠️", color="red")
+    _show(axes[2], fake_img_dp, f"{attack_type}\nWith DP  🔒", color="green")
 
     plt.suptitle("Model Inversion Attack Comparison", fontsize=12, fontweight="bold")
     plt.tight_layout()
@@ -864,8 +838,7 @@ def attack_both_models(
 
     return {
         "client_tag":       plot_file_tag,
-        "msg_no_dp_loss":   loss_msg_no_dp,
-        "pix_no_dp_loss":   loss_pix_no_dp,
-        "msg_dp_loss":      loss_msg_dp,
-        "pix_dp_loss":      loss_pix_dp,
+        "attack_type":      attack_type,
+        "no_dp_final_loss": loss_no_dp,
+        "with_dp_final_loss": loss_dp,
     }
