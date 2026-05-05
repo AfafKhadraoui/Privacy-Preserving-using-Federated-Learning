@@ -15,7 +15,11 @@ __pycache__/
 logs/ 
 debug_crop.png 
 __pycache__/ 
-data/
+data/*
+!data/raw/
+data/raw/*
+!data/raw/Abdelmadjid_Tebboune.jpg
+!data/raw/Taher_Elgamal.jpg
 /.venv
 /face-recog/
 /results/metrics/
