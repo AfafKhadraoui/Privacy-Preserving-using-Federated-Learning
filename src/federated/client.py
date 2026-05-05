@@ -376,6 +376,7 @@ class FaceClient(fl.client.NumPyClient):
                 epsilon_max=proj_cfg.EPSILON_MAX,
                 random_seed=proj_cfg.DP_RANDOM_SEED,
                 client_id=self.client_id,
+                freeze_backbone=False,
             )
             print(f"[{self.client_id}] Training WITH DP (Safe Mode)...")
             try:
