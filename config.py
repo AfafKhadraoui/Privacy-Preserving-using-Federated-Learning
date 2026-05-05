@@ -81,10 +81,7 @@ MODEL_CENTRALIZED = os.path.join(MODELS_DIR, "model_centralized.pth")
 MODEL_NO_DP       = os.path.join(MODELS_DIR, "model_fl_no_dp.pth")    # The one we attack
 MODEL_WITH_DP     = os.path.join(MODELS_DIR, "model_fl_with_dp.pth")  # The one that resists the attack!
 
-# Attack (model inversion)
-# Pixel-space inversion: optimizes image pixels directly to match target embedding.
-ATTACK_ITERATIONS = 200
-ATTACK_LR = 0.02
+
 # After preprocessing, which client folders to evaluate (different identities / test photos).
 ATTACK_EVAL_CLIENT_IDS = ("client_00", "client_01")
 
