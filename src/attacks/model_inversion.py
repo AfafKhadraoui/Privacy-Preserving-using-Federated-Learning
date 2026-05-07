@@ -75,11 +75,11 @@ def load_mobilestylegan(device):
     ckpt_path = os.path.join(mob_dir, "mobilestylegan_ffhq.ckpt")
     
     if os.path.exists(ckpt_path):
-        ckpt = torch.load(ckpt_path, map_location="cpu")
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     else:
         print(f"    [INFO] Downloading pretrained weights to {ckpt_path}...")
         gdown.download(id="11Kja0XGE8liLb6R5slNZjF3j3v_6xydt", output=ckpt_path, quiet=False)
-        ckpt = torch.load(ckpt_path, map_location="cpu")
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     
     state_dict = ckpt["state_dict"]
     
@@ -183,7 +183,7 @@ def run_mobilestylegan_inversion_attack(
         loss.backward()
         optimizer.step()
         
-        if i % 100 == 0:
+        if i % 10 == 0 or i == iterations - 1:
             print(f"      iter {i:4d}: identity={identity_loss.item():.4f}, sym={sym.item():.4f}, w_reg={w_reg.item():.4f}")
             gc.collect()
 
@@ -231,7 +231,7 @@ def load_model_from_checkpoint(checkpoint_path: str):
     """
     model = get_model(mode="eval")
     # map_location handles environments without a GPU
-    state_dict = torch.load(checkpoint_path, map_location="cpu")
+    state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     
     # Strip DP wrapper prefixes if present (opacus wraps module with "._module.")
     cleaned_state = {}
@@ -265,7 +265,7 @@ def get_target_embedding(model, client_dir: str) -> tuple[torch.Tensor, str]:
     def _load_face_file(file_path: str) -> torch.Tensor:
         lower = file_path.lower()
         if lower.endswith(".pt"):
-            tensor = torch.load(file_path, map_location="cpu")
+            tensor = torch.load(file_path, map_location="cpu", weights_only=False)
             return _ensure_image_tensor(tensor)
 
         image = Image.open(file_path).convert("RGB")
@@ -318,7 +318,7 @@ def load_face_prior(prior_dir: str, max_images: int = 32) -> torch.Tensor:
 
     for file_path in selected_paths:
         if file_path.lower().endswith(".pt"):
-            tensor = torch.load(file_path, map_location="cpu").float()
+            tensor = torch.load(file_path, map_location="cpu", weights_only=False).float()
             image_tensors.append(_ensure_image_tensor(tensor))
         else:
             image = Image.open(file_path).convert("RGB")
@@ -363,7 +363,7 @@ def get_general_face_prior(clients_root: str, exclude_client: str = None, max_im
     for path in selected_paths:
         try:
             if path.lower().endswith(".pt"):
-                tensor = torch.load(path, map_location="cpu").float()
+                tensor = torch.load(path, map_location="cpu", weights_only=False).float()
                 image_tensors.append(_ensure_image_tensor(tensor))
             else:
                 image = Image.open(path).convert("RGB")
@@ -642,8 +642,9 @@ def run_inversion_attack(
 
         loss_history.append(float(loss.item()))
 
-        if i % 200 == 0:
+        if i % 50 == 0:
             print(f"    iter {i:4d}: mse={mse.item():.6f}, tv={tv.item():.6f}, total={loss.item():.6f}")
+            gc.collect()
         
         # Clear intermediate tensors to save memory
         if i % 50 == 0:
@@ -679,7 +680,7 @@ def _embedding_from_image(model, image_path: str, device: str):
     """
     lower = image_path.lower()
     if lower.endswith(".pt"):
-        tensor = torch.load(image_path, map_location="cpu").float()
+        tensor = torch.load(image_path, map_location="cpu", weights_only=False).float()
         tensor = _ensure_image_tensor(tensor)
         name = os.path.splitext(os.path.basename(image_path))[0]
     else:
@@ -782,6 +783,7 @@ def attack_both_models(
 
     del model_no_dp
     gc.collect()
+    torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
     # -- 2. Attack With-DP Model --
     print("  Running on Version B (with DP)...")

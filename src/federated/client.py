@@ -51,7 +51,7 @@ class FaceDataset(Dataset):
         return len(self.files)
 
     def __getitem__(self, idx):
-        tensor = torch.load(self.files[idx])   # shape [3, 160, 160]
+        tensor = torch.load(self.files[idx], weights_only=False)   # shape [3, 160, 160]
         return tensor
 
 
