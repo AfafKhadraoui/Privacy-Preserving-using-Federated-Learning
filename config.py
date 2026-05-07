@@ -31,6 +31,11 @@ MAX_GRAD_NORM    = 1.0   # Clip the gradients so no single photo dominates the u
 DELTA            = 1e-5
 EPSILON_MAX      = 5.0   # Hard privacy budget cap (training should stop if exceeded)
 DP_RANDOM_SEED   = 42    # Reproducibility seed for DP experiments
+
+# Security Attack Settings
+ATTACK_ITERATIONS = 1000   # Number of reconstruction steps
+ATTACK_LR         = 0.01   # Learning rate for the attack optimizer
+
 PROTOCOL_VERSION = "v1" # Version used in signed metadata / protocol integrity checks
 ENFORCE_SIGNATURES = True
 CRYPTO_DEBUG_LOGS = True
@@ -83,10 +88,7 @@ MODEL_CENTRALIZED = os.path.join(MODELS_DIR, "model_centralized.pth")
 MODEL_NO_DP       = os.path.join(MODELS_DIR, "model_fl_no_dp.pth")    # The one we attack
 MODEL_WITH_DP     = os.path.join(MODELS_DIR, "model_fl_with_dp.pth")  # The one that resists the attack!
 
-# Attack (model inversion)
-# Pixel-space inversion: optimizes image pixels directly to match target embedding.
-ATTACK_ITERATIONS = 200
-ATTACK_LR = 0.02
+
 # After preprocessing, which client folders to evaluate (different identities / test photos).
 ATTACK_EVAL_CLIENT_IDS = ("client_00", "client_01")
 
