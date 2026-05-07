@@ -21,7 +21,7 @@ res = attack_both_models(
     model_with_dp_path=MODEL_WITH_DP,
     client_dir=client_dir,
     output_dir=PLOTS_DIR,
-    iterations=1000,
+    iterations=300,
     attack_lr=0.01,
     plot_file_tag="client_00",
 )

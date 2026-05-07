@@ -19,6 +19,12 @@ Privacy budget (epsilon):
     We enforce a hard limit (epsilon_max) — training stops if exceeded.
 
 Owner: Amel
+
+Updated to support alternative DP methods:
+    - "opacus"     : Standard Opacus DP-SGD
+    - "manual_sgd" : Manual batch-level clipping + noise (lighter weight)
+    - "embedding"  : Local DP on feature vectors
+    - "client"     : Client-level output perturbation
 """
 
 from opacus import PrivacyEngine
@@ -70,26 +76,18 @@ class PrivacyMonitor:
         self.epsilon_history: List[float] = []
         self.epoch_counter = 0
 
-    def check_and_log(self, privacy_engine: PrivacyEngine) -> float:
+    def check_and_log(self, privacy_engine_or_epsilon: object) -> float:
         """
         Check current epsilon and enforce the budget limit.
 
-        Call this after every epoch of training, like this:
-            try:
-                epsilon = monitor.check_and_log(engine)
-            except PrivacyBudgetExceeded:
-                break  # stop training
-
         Args:
-            privacy_engine: The PrivacyEngine returned by make_private_with_dp()
-
-        Returns:
-            Current epsilon value
-
-        Raises:
-            PrivacyBudgetExceeded: If epsilon exceeds epsilon_max
+            privacy_engine_or_epsilon: The PrivacyEngine or a raw float epsilon value
         """
-        epsilon = privacy_engine.get_epsilon(delta=self.delta)
+        if isinstance(privacy_engine_or_epsilon, (float, int)):
+            epsilon = float(privacy_engine_or_epsilon)
+        else:
+            epsilon = privacy_engine_or_epsilon.get_epsilon(delta=self.delta)
+
         self.epsilon_history.append(epsilon)
         self.epoch_counter += 1
 

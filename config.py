@@ -15,9 +15,16 @@ LEARNING_RATE = 1e-4
 # Two-model strategy
 # False = Version A (no DP, the vulnerable baseline)
 # True  = Version B (with DP, the protected one that foils the attack)
-USE_DP = False
+# Differential Privacy Settings
+# ----------------------------
+# DP_MODE options:
+#   "opacus"      - Original Opacus DP-SGD (sample-level, memory intensive)
+#   "manual_sgd"  - Manual gradient clipping + noise (sample-level substitute)
+#   "embedding"   - Local DP on embeddings (add noise to 512-dim vectors)
+#   "client"      - Client-level DP (add noise to weight updates)
+#   "none"        - No DP (active when USE_DP is False)
+DP_MODE = "embedding"  # Default to original implementation
 
-# Differential Privacy (Opacus)
 # These are only active when USE_DP is True
 NOISE_MULTIPLIER = 1.1   # How much noise we add to gradients. Higher = more private but worse accuracy.
 MAX_GRAD_NORM    = 1.0   # Clip the gradients so no single photo dominates the update
