@@ -6,6 +6,21 @@ This project implements a decoupled, privacy-preserving face recognition system 
 - **Central FL Server (`port 5000`)**: Orchestrates the Federated Learning pipeline using Flower (`flwr`). It distributes the global model and aggregates weights, but never processes raw images.
 - **Edge Client API (`port 5001`)**: Simulates the local user device. It runs the MTCNN face detector and PyTorch model locally to generate embeddings and train local model updates.
 - **React Frontend (`port 3000`)**: The Web UI where users interact with the system.
+### 🛡️ Differential Privacy Modes
+This project supports multiple DP implementations to balance between formal guarantees and hardware constraints:
+
+1. **Opacus DP-SGD (Default)**: Uses the industry-standard Opacus library. 
+   - **Note**: Backbone freezing is enabled to prevent OOM on 8GB-16GB RAM machines.
+2. **Manual DP-SGD (Lightweight)**: A "from-scratch" implementation of gradient clipping and noise injection.
+   - Use this if you want to inspect the math/logic without external library overhead.
+
+**How to switch:**
+Modify `config.py`:
+```python
+DP_MODE = "opacus"     # Standard mode
+# OR
+DP_MODE = "manual_sgd" # From-scratch mode
+```
 
 ## 1. Prerequisites
 - Python 3.11+ installed.
