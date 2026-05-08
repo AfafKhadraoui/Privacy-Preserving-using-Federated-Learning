@@ -3,14 +3,16 @@
 import sys
 import os
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Add project root to sys.path
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _ROOT)
 
 from config import MODEL_NO_DP, MODEL_WITH_DP, PLOTS_DIR
 from src.attacks.model_inversion import attack_both_models
 
 os.makedirs(PLOTS_DIR, exist_ok=True)
 
-client_dir = os.path.join(os.path.dirname(__file__), "data", "clients", "client_00")
+client_dir = os.path.join(_ROOT, "data", "clients", "client_00")
 
 print("=" * 60)
 print("Running inversion attack on client_00...")
