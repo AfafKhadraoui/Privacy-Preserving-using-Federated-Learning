@@ -141,12 +141,24 @@ def run_mobilestylegan_inversion_attack(
     
     optimizer = torch.optim.Adam([w_plus], lr=lr)
     
-    print(f"    Running High-Fidelity MobileStyleGAN attack on {device}...")
+    print(f"    Running Gradual-Refinement MobileStyleGAN attack on {device}...")
     for i in range(iterations):
         optimizer.zero_grad()
         
+        # GRADUAL OPTIMIZATION: Only update a subset of latents initially to save RAM
+        # i < 20%: Coarse features only (first 8 layers)
+        # i > 20%: All layers
+        current_w = w_plus.clone()
+        if i < iterations * 0.2:
+            # Mask out the gradients for the fine layers
+            mask = torch.ones_like(w_plus)
+            mask[:, 8:, :] = 0
+            current_w = w_plus * mask + w_plus.detach() * (1 - mask)
+        else:
+            current_w = w_plus
+
         # Generate image from current latent
-        img_s = generator(style=w_plus)
+        img_s = generator(style=current_w)
         
         # Noise Augmentation: Prevents optimization from getting stuck in 
         # local minima and encourages sharper, more robust facial features.
@@ -180,12 +192,27 @@ def run_mobilestylegan_inversion_attack(
         # Maximizing sharpness: High identity weight, low regularization, low TV
         loss = 20.0 * identity_loss + 0.5 * w_reg + 0.00005 * tv + 0.05 * sym
         
+        # 5. Backward and Step
         loss.backward()
         optimizer.step()
         
-        if i % 10 == 0 or i == iterations - 1:
-            print(f"      iter {i:4d}: identity={identity_loss.item():.4f}, sym={sym.item():.4f}, w_reg={w_reg.item():.4f}")
+        # AGGRESSIVE RAM RECOVERY:
+        # Clear intermediate tensors immediately after the step
+        del img_s, img_proc, synth_img, generated_emb, loss, identity_loss, w_reg, tv, sym
+        if i % 5 == 0:
             gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        
+        if i % 10 == 0 or i == iterations - 1:
+            # We have to re-calculate these for printing because we deleted them for RAM
+            with torch.no_grad():
+                img_p = generator(style=w_plus)
+                res_img = F.interpolate(img_p, size=(160, 160))
+                new_emb = model(res_img)
+                curr_id = 1.0 - F.cosine_similarity(new_emb, target_embedding, dim=1).mean()
+                print(f"      iter {i:4d}: identity={curr_id.item():.4f}")
+                del img_p, res_img, new_emb
 
     final_image_batch = generator(style=w_plus.detach()).detach()
     # Resize for saving so it matches the expected 160x160 output

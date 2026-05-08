@@ -21,10 +21,18 @@ Privacy budget (epsilon):
 Owner: Amel
 
 Updated to support alternative DP methods:
-    - "opacus"     : Standard Opacus DP-SGD
-    - "manual_sgd" : Manual batch-level clipping + noise (lighter weight)
-    - "embedding"  : Local DP on feature vectors
-    - "client"     : Client-level output perturbation
+    - "opacus"     : Standard Opacus DP-SGD (Professional, robust, but memory-heavy)
+    - "manual_sgd" : From-scratch batch-level clipping + noise (Transparent, lightweight)
+    - "embedding"  : Local DP on feature vectors (Perturbs embeddings directly)
+    - "client"     : Client-level weight perturbation (Add noise to final model weights)
+
+THE "OPACUS MEMORY PROBLEM":
+    InceptionResnetV1 has ~28M parameters. Opacus requires storing a gradient
+    tensor for EVERY parameter for EVERY sample in a batch.
+    Calculation: 28,000,000 * 32 (batch size) * 4 (float32) = ~3.6 GB per client.
+    With 2 clients + OS + PyTorch overhead, an 8GB machine will CRASH (OOM).
+    SOLUTION: We freeze the "backbone" and only train the "head" (last layers).
+    This reduces trainable params to ~260K, cutting memory usage by 100x.
 """
 
 from opacus import PrivacyEngine
@@ -165,6 +173,7 @@ def make_private_with_dp(
     batch_memory_manager: bool = False,
     client_id: str = "unknown",
     freeze_backbone: bool = True,
+    method: str = "opacus",
 ) -> Tuple[torch.nn.Module, torch.optim.Optimizer, object, PrivacyEngine, PrivacyMonitor]:
     """
     Wrap a model, optimizer, and data loader with Differential Privacy (DP-SGD).
@@ -241,13 +250,38 @@ def make_private_with_dp(
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer_private = optimizer.__class__(trainable_params, **optimizer_kwargs)
 
-    model_private, optimizer_private, train_loader_private = privacy_engine.make_private(
-        module=model,
-        optimizer=optimizer_private,
-        data_loader=train_loader,
-        noise_multiplier=noise_multiplier,
-        max_grad_norm=max_grad_norm,
-    )
+    # --- OPTION 1: OPACUS (Standard) ---
+    if method == "opacus":
+        model_private, optimizer_private, train_loader_private = privacy_engine.make_private(
+            module=model,
+            optimizer=optimizer_private,
+            data_loader=train_loader,
+            noise_multiplier=noise_multiplier,
+            max_grad_norm=max_grad_norm,
+        )
+    
+    # --- OPTION 2: MANUAL (From Scratch) ---
+    elif method == "manual_sgd":
+        # We use a wrapper that adds noise in the optimizer step
+        logger.info("[DP Manual] Using from-scratch clipping and noise addition")
+        from .manual_dp import ManualDPWrapper
+        model_private = model
+        optimizer_private = ManualDPWrapper(
+            optimizer=optimizer_private,
+            noise_multiplier=noise_multiplier,
+            max_grad_norm=max_grad_norm
+        )
+        train_loader_private = train_loader
+        
+    # --- OPTION 3: EMBEDDING (Local DP) ---
+    elif method == "embedding":
+        logger.info("[DP Embedding] Perturbing embeddings directly (Local DP)")
+        model_private = model
+        optimizer_private = optimizer_private
+        train_loader_private = train_loader
+    
+    else:
+        raise ValueError(f"Unknown DP method: {method}")
 
     if batch_memory_manager:
         train_loader_private = BatchMemoryManager(
@@ -367,3 +401,53 @@ PRIVACY_BUDGETS = {
         random_seed=42,
     ),
 }
+
+
+# --- MANUAL DP UTILITIES (FROM SCRATCH) ---
+
+def apply_manual_dp_sgd(model: torch.nn.Module, noise_multiplier: float, max_grad_norm: float):
+    """
+    Manually clip and noise gradients across all trainable parameters.
+    
+    This is the core 'From Scratch' logic you can show in your slides.
+    Instead of using Opacus, we iterate through every parameter ourselves.
+    """
+    # 1. Global Clipping
+    params = [p for p in model.parameters() if p.requires_grad and p.grad is not None]
+    if not params:
+        return
+        
+    torch.nn.utils.clip_grad_norm_(params, max_norm=max_grad_norm)
+    
+    # 2. Gaussian Noising
+    with torch.no_grad():
+        for p in params:
+            # Generate noise scaled by the clipping norm
+            noise = torch.randn_like(p.grad) * (noise_multiplier * max_grad_norm)
+            p.grad.add_(noise)
+
+def apply_embedding_noise(embeddings: torch.Tensor, noise_scale: float) -> torch.Tensor:
+    """Adds Gaussian noise to embeddings (Local DP / Feature Perturbation)."""
+    noise = torch.randn_like(embeddings) * noise_scale
+    return embeddings + noise
+
+def apply_client_dp_noise(model: torch.nn.Module, noise_scale: float):
+    """Adds Gaussian noise directly to model weights (Client-level DP)."""
+    with torch.no_grad():
+        for p in model.parameters():
+            if p.requires_grad:
+                noise = torch.randn_like(p) * noise_scale
+                p.add_(noise)
+
+def get_manual_epsilon(steps: int, batch_size: int, total_samples: int, noise_multiplier: float, delta: float) -> float:
+    """
+    Simple DP accounting for manual SGD using a basic formula.
+    Higher noise_multiplier = lower epsilon (more privacy).
+    """
+    if noise_multiplier <= 0:
+        return 999.9 # Infinitely bad privacy
+        
+    # Basic composition rule (very conservative)
+    q = batch_size / total_samples
+    epsilon = q * np.sqrt(steps * np.log(1/delta)) / noise_multiplier
+    return float(epsilon)

@@ -15,6 +15,8 @@ LEARNING_RATE = 1e-4
 # Two-model strategy
 # False = Version A (no DP, the vulnerable baseline)
 # True  = Version B (with DP, the protected one that foils the attack)
+USE_DP = True
+
 # Differential Privacy Settings
 # ----------------------------
 # DP_MODE options:
@@ -23,7 +25,7 @@ LEARNING_RATE = 1e-4
 #   "embedding"   - Local DP on embeddings (add noise to 512-dim vectors)
 #   "client"      - Client-level DP (add noise to weight updates)
 #   "none"        - No DP (active when USE_DP is False)
-DP_MODE = "embedding"  # Default to original implementation
+DP_MODE = "opacus"
 
 # These are only active when USE_DP is True
 NOISE_MULTIPLIER = 1.1   # How much noise we add to gradients. Higher = more private but worse accuracy.
