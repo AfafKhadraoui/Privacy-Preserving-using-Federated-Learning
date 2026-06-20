@@ -1,18 +1,18 @@
 """
-AUGMENTATION MODULE (Client-Side Preprocessing)
+AUGMENTATION MODULE (Client-Side Training Pipeline)
 
 This module defines image augmentation strategies used in the
 federated learning client pipeline for face recognition.
 
 PURPOSE:
-- Improve model generalization on small client datasets
-- Simulate real-world variations (lighting, pose, orientation)
+- Improve generalization on small client datasets
+- Simulate real-world variations (lighting, pose, slight misalignment)
 - Reduce overfitting during local training
 
 IMPORTANT:
-- Augmentation is applied ONLY on client devices
-- Images are NOT stored after augmentation
-- Each training iteration may produce different augmented versions
+- Augmentation is applied ONLY during client training
+- No augmented images are stored
+- Each forward pass may generate different variants
 """
 
 import torchvision.transforms as transforms
@@ -21,38 +21,32 @@ import torchvision.transforms as transforms
 class FaceAugmentation:
     """
     Face augmentation pipeline for federated learning clients.
+    Designed for tensor-based face images (160x160 from preprocessing).
 
-    Supports configurable augmentation strength:
-    - affine (pose/misalignment)
-    - gaussian blur (out-of-focus simulation)
+    Supports:
+    - Horizontal flip
+    - Color jitter (lighting variation)
+    - Optional affine transforms (pose variation)
+    - Optional gaussian blur (out-of-focus simulation)
     """
 
     def __init__(
         self,
-        use_affine=True,
-        use_blur=False
+        use_affine: bool = True,
+        use_blur: bool = False
     ):
-        """
-        Initialize augmentation pipeline.
-
-        Args:
-            use_affine (bool): enable slight geometric transformations
-            use_blur (bool): enable gaussian blur simulation
-        """
-
         transforms_list = []
 
         # -----------------------------
-        # Basic augmentations
+        # Geometric augmentation
         # -----------------------------
         transforms_list.append(
             transforms.RandomHorizontalFlip(p=0.5)
         )
 
-        transforms_list.append(
-            transforms.RandomRotation(degrees=10)
-        )
-
+        # -----------------------------
+        # Photometric augmentation
+        # -----------------------------
         transforms_list.append(
             transforms.ColorJitter(
                 brightness=0.2,
@@ -64,25 +58,26 @@ class FaceAugmentation:
 
         # -----------------------------
         # Optional affine transform
+        # (small pose variations only)
         # -----------------------------
         if use_affine:
             transforms_list.append(
                 transforms.RandomAffine(
-                    degrees=5,              # small rotation
-                    translate=(0.02, 0.02), # small shift
-                    scale=(0.95, 1.05),     # slight zoom
-                    shear=2                 # slight distortion
+                    degrees=5,
+                    translate=(0.02, 0.02),
+                    scale=(0.95, 1.05),
+                    shear=2
                 )
             )
 
         # -----------------------------
-        # Optional gaussian blur
+        # Optional blur simulation
         # -----------------------------
         if use_blur:
             transforms_list.append(
                 transforms.GaussianBlur(
-                    kernel_size=3,
-                    sigma=(0.1, 1.0)
+                    kernel_size=5,
+                    sigma=(0.1, 2.0)
                 )
             )
 
@@ -90,18 +85,43 @@ class FaceAugmentation:
 
     def __call__(self, image):
         """
-        Apply augmentation to a single image.
+        Apply augmentation to a single image tensor.
+
+        Args:
+            image (Tensor or PIL.Image): input face image
+
+        Returns:
+            Augmented image
         """
         return self.transform(image)
 
     def augment_batch(self, images):
         """
         Apply augmentation to a batch of images.
+
+        Args:
+            images (list or iterable of tensors)
+
+        Returns:
+            list of augmented images
         """
         return [self.transform(img) for img in images]
 
-    def generate_variants(self, image, n=5):
+    def generate_variants(self, image, n: int = 5):
         """
-        Generate N augmented versions of the same image.
+        Generate multiple stochastic augmented versions
+        of the same image.
+
+        Useful for:
+        - contrastive learning
+        - robustness testing
+        - data balancing
+
+        Args:
+            image: input image tensor
+            n: number of variants
+
+        Returns:
+            list of augmented images
         """
         return [self.transform(image) for _ in range(n)]

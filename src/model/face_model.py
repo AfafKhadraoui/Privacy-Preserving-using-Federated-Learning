@@ -184,7 +184,7 @@ def load_model(path, mode="train"):
     model = GlobalFaceModel(pretrained="vggface2")
 
     if os.path.exists(path):
-        state_dict = torch.load(path, map_location=torch.device("cpu"))
+        state_dict = torch.load(path, map_location=torch.device("cpu"), weights_only=False)
         model.load_state_dict(state_dict)
     else:
         # No saved model → initialize fresh

@@ -1,17 +1,19 @@
 import { BrowserRouter, Routes, Route, Link } from 'react-router-dom';
 import Register from './pages/Register';
-import FLResults from './pages/FLResults';
+import Recognize from './pages/Recognize';
 
 export default function App() {
   return (
     <BrowserRouter>
       <nav style={styles.nav}>
         <Link to="/" style={styles.link}>Register</Link>
-        <Link to="/results" style={styles.link}>FL Results</Link>
+        <Link to="/recognize" style={styles.link}>Recognize</Link>
+        {/* <Link to="/results" style={styles.link}>FL Results</Link> */}
       </nav>
       <Routes>
         <Route path="/" element={<Register />} />
-        <Route path="/results" element={<FLResults />} />
+        <Route path="/recognize" element={<Recognize />} />
+        {/* <Route path="/results" element={<FLResults />} /> */}
       </Routes>
     </BrowserRouter>
   );

@@ -36,7 +36,7 @@ RAW_DATA_DIR = PROJECT_ROOT / "data" / "raw"
 CROPPED_DATA_DIR = PROJECT_ROOT / "data" / "cropped"
 LOG_DIR = PROJECT_ROOT / "logs"
 
-SUPPORTED_EXTENSIONS: set = {".jpg", ".jpeg", ".png"}
+SUPPORTED_EXTENSIONS: set = {".jpg", ".jpeg", ".png", ".webp"}
 
 # MTCNN parameters — must match project spec exactly
 MTCNN_IMAGE_SIZE: int = 160     # InceptionResNetV1 input size
