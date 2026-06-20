@@ -31,3 +31,6 @@ error.txt
 run_attack_debug.log
 
 .vscode/
+
+# Audit log backups
+*.bak
