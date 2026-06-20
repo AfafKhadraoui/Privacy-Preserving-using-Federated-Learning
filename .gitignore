@@ -29,3 +29,5 @@ cns_project_cache/
 vendor/
 error.txt
 run_attack_debug.log
+
+.vscode/
